@@ -1139,3 +1139,19 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 
 .outline-tab-row{display:flex;align-items:center}.outline-tab-row .outline-tab-item{flex:1;min-width:0;text-align:left}.outline-tab-toggle{border:0;background:transparent;width:28px;flex:none;cursor:pointer}.outline-heading{text-align:left;overflow-wrap:anywhere;width:100%}.outline-heading:focus-visible{outline:2px solid #5267ff;outline-offset:-2px}.custom-spacing-modal{max-height:90vh;overflow:auto}
+
+/* User-sized review panel; keep existing overlay breakpoints. */
+#reviewPanel{position:relative;padding-left:6px}
+#reviewResize{position:absolute;left:0;top:0;bottom:0;width:8px;cursor:col-resize;touch-action:none;z-index:5;background:transparent}
+#reviewResize:hover,#reviewResize:focus-visible{background:#5267ff55;outline:2px solid #5267ff}
+#workspace.review-overlay>#reviewPanel:not(.hidden){width:var(--review-width,330px);max-width:calc(100% - 24px)}
+#pageSettingsDialog{border:1px solid #ddd;border-radius:12px;width:min(440px,90vw);max-height:85vh;overflow:auto;padding:22px}
+#pageSettingsDialog::backdrop{background:#0005}
+#pageSettingsDialog label{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+#pageSettingsDialog input,#pageSettingsDialog select{padding:7px;width:100%;box-sizing:border-box}
+#pageSettingsDialog .page-fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+#pageSettingsDialog p{font-size:12px;color:#666}
+.editor-wrap[data-page-mode="pages"]>.ck-editor{width:var(--page-width)!important;min-width:var(--page-width);max-width:none;margin:0 auto}
+.editor-wrap[data-page-mode="pages"]>.ck-editor .ck-editor__editable_inline{width:var(--page-width)!important;min-height:var(--page-height)!important;padding:var(--page-top) var(--page-right) var(--page-bottom) var(--page-left)!important;box-sizing:border-box}
+.editor-wrap[data-page-mode="pageless"]>.ck-editor{width:100%!important;min-width:0;max-width:none}
+.editor-wrap[data-page-mode="pageless"]>.ck-editor .ck-editor__editable_inline{width:100%!important;min-height:60vh!important;padding:24px!important;box-shadow:none;background:transparent}

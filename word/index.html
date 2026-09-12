@@ -4,7 +4,7 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>5golgyeo_word</title>
 <link rel="stylesheet" href="./vendor/ckeditor5/ckeditor5.css?v=48.4.0">
-  <link rel="stylesheet" href="./5golgyeo_word.css?v=20260913-merged-styles">
+  <link rel="stylesheet" href="./5golgyeo_word.css?v=20260913-pages-review-r2">
 </head>
 <body>
 <div id="app">
@@ -21,7 +21,7 @@
   <button data-action="savejson" data-icon="device-floppy">저장</button>
   <button data-action="saveas" data-icon="file-export">다른 이름 저장</button>
   <button data-action="exportmenu" data-icon="download">내보내기</button>
-  <button data-action="settings" data-icon="settings">설정</button>
+  <button id="pageSettingsBtn">페이지 설정</button><button data-action="settings" data-icon="settings">설정</button>
 </div>
 </div>
 <div class="menubar">
@@ -133,7 +133,7 @@
     </div>
   </div>
 
-  <aside class="review hidden" id="reviewPanel">
+  <aside class="review hidden" id="reviewPanel"><div id="reviewResize" role="separator" tabindex="0" aria-label="검수 패널 너비" aria-orientation="vertical"></div>
     <div class="review-head">
       <b>로컬 검수</b>
       <div class="review-mode-toggle" role="group" aria-label="검수 모드 선택">
@@ -146,7 +146,7 @@
       <div class="card review-selection-card"><h3 id="reviewSourceTitle">선택된 본문 원문</h3><div class="body">
         <div id="reviewSelectedSource" class="preview">아직 선택된 텍스트가 없습니다.</div>
         <section id="kiwiPanel" class="kiwi-panel hidden" aria-label="Kiwi 로컬 띄어쓰기 복원">
-          <div class="actions"><button id="kiwiRestoreBtn" type="button" disabled>검수 다시 실행</button></div>
+          <div class="actions"><button id="kiwiRestoreBtn" type="button" disabled>검수</button></div>
           <p id="kiwiStatus" role="status" aria-live="polite">텍스트를 선택한 뒤 검수를 눌러 주세요.</p>
           <div id="kiwiResultBox" class="hidden">
             <strong>원문</strong><div id="kiwiOriginal" class="preview"></div>
@@ -276,6 +276,13 @@
   <button id="deleteTabAction" class="danger">탭 삭제</button>
 </div>
 
-  <script type="module" src="./5golgyeo_word.js?v=20260913-merged-styles"></script>
+  <script type="module" src="./5golgyeo_word.js?v=20260913-pages-review-r2"></script>
   <script src="./5golgyeo_word_pdf.js?v=20260912-kiwi-1"></script>
+<dialog id="pageSettingsDialog"><form id="pageSettingsForm"><h2>페이지 설정</h2>
+<label>표시 방식<select id="page-mode"><option value="pages">페이지 (Pages)</option><option value="pageless">페이지 없음 (Pageless)</option></select></label>
+<label>용지<select id="page-size"><option>A4</option><option>A3</option><option>Letter</option><option value="Custom">사용자 지정</option></select></label>
+<label>방향<select id="page-orientation"><option value="portrait">세로</option><option value="landscape">가로</option></select></label>
+<div class="page-fields"><label>너비 (mm)<input id="page-width" type="number" min="80" max="600" step="0.1" required></label><label>높이 (mm)<input id="page-height" type="number" min="80" max="600" step="0.1" required></label></div>
+<fieldset><legend>여백 (mm)</legend><div class="page-fields"><label>위<input id="page-top" type="number" min="0" max="290" step="0.1" required></label><label>아래<input id="page-bottom" type="number" min="0" max="290" step="0.1" required></label><label>왼쪽<input id="page-left" type="number" min="0" max="290" step="0.1" required></label><label>오른쪽<input id="page-right" type="number" min="0" max="290" step="0.1" required></label></div></fieldset><p>현재 문서에 저장됩니다. 여백은 본문 공간이 남도록 조정됩니다. 자동 페이지 분할은 하지 않습니다.</p><div class="actions"><button type="button" id="pageSettingsCancel">취소</button><button type="submit" class="primary">적용</button></div></form></dialog>
 </body></html>
+

@@ -455,6 +455,7 @@ function loadDocState(id,{saveCurrent=true}={}){
   loadingDocument=true;
   wordEditor.setData(documents[id].html||'<p></p>');
   loadingDocument=false;
+  renderPageSettings();
   updateOutline();
   renderTabs();
   updateCount();
@@ -661,6 +662,7 @@ function bindSpacingUi(){
    -------------------------------------------------------------------------- */
 function projectObject(){
   saveActiveDocState();
+  for(const doc of Object.values(documents))doc.pageSettings=normalizePageSettings(doc.pageSettings);
   return {format:'5golgyeo-word-project',version:2,engine:'ckeditor5',createdWith:BUILD,activeDocId,documents,savedAt:new Date().toISOString()};
 }
 function saveProject(name=baseName()){
@@ -917,7 +919,7 @@ async function runLocalReview(){
   if(!selection?.text.trim())return toast('검수할 텍스트를 먼저 선택해 주세요. PDF는 검수 패널의 PDF 모드에서 선택해 주세요.');
   kiwiBusy=true;kiwiResult=null;kiwiMessage='한국어 텍스트 복원기를 준비하는 중…';updateKiwiUi();
   try{
-    const result=await localReviewEngines.kiwi(selection.text);
+    const result=selection.blocks?await reviewKiwiBlocks(selection.blocks):await localReviewEngines.kiwi(selection.text);
     if(version!==kiwiSelectionVersion||selection!==pendingReviewSelection||selection.docId!==activeDocId)return;
     presentLocalReview(result,selection);
   }catch(error){if(version===kiwiSelectionVersion)kiwiMessage=`로컬 복원 오류: ${error.message}`;}
@@ -943,14 +945,8 @@ function applyKiwiResult(){
     resetReviewSelection();return toast('문서가 변경되었습니다. 텍스트를 다시 선택해 검수해 주세요.');
   }
   try{
-    const model=wordEditor.model,root=model.document.getRoot(selection.snapshot.rootName);
-    model.change(writer=>{
-      const start=writer.createPositionFromPath(root,selection.snapshot.start);
-      const end=writer.createPositionFromPath(root,selection.snapshot.end);
-      writer.remove(writer.createRange(start,end));
-      const view=wordEditor.data.processor.toView(textAsEditorHtml(result.text));
-      model.insertContent(wordEditor.data.toModel(view),start);
-    });
+    if(!selection.blocks||!result.blockResults)throw new Error('문단 선택 정보가 없습니다.');
+    applyKiwiWhitespace(selection.blocks,result.blockResults);
     resetReviewSelection();toast('선택 영역에 띄어쓰기 복원 결과를 적용했습니다.');
   }catch{resetReviewSelection();toast('선택 영역을 적용할 수 없습니다. 다시 선택해 주세요.');}
 }
@@ -984,7 +980,9 @@ function captureReviewSelection(text,snapshot){
      JSON.stringify(pendingReviewSelection.snapshot)===JSON.stringify(snapshot))return;
   // Invalidate previous results and abort their request before accepting a new selection.
   resetReviewSelection({keepStatus:true});
-  pendingReviewSelection={text,snapshot,mode:reviewSourceMode,docId:activeDocId,documentHtml:currentHtml()};
+  const blocks=reviewSourceMode==='editor'?captureKiwiBlocks(snapshot):null;
+  if(blocks)text=blocks.map(b=>b.map(l=>l.text).join('\n')).join('\n\n');
+  pendingReviewSelection={text,snapshot,blocks,mode:reviewSourceMode,docId:activeDocId,documentHtml:currentHtml()};
   reviewRangeSnapshot=snapshot;
   reviewPanelMessage='선택 영역을 저장했습니다. 검수를 눌러 띄어쓰기를 복원하세요.';
   $('#cleanPreview').textContent='PDF 모드의 로컬 복원을 사용하세요.';
@@ -1243,6 +1241,8 @@ function bindAppUi(){
   $('#importApiSettings').onclick=()=>$('#apiSettingsFile').click();$('#apiSettingsFile').onchange=async e=>{try{const d=JSON.parse(await e.target.files[0].text());if(d.ocrGoogleVisionKey!=null)localStorage.setItem('pdfEditor.ocrGoogleVisionKey',d.ocrGoogleVisionKey);showSettings();toast('API 설정을 불러왔습니다.');}catch{toast('설정 파일을 읽지 못했습니다.');}e.target.value='';};
   $('#appSwitch').onclick=()=>toast('문서 편집기');
   bindSplitter();
+  setupReviewResize();
+  setupPageSettings();
   document.addEventListener('keydown',e=>{if(e.ctrlKey&&e.key.toLowerCase()==='s'){e.preventDefault();e.shiftKey?saveProjectAs():saveProject();}if(e.ctrlKey&&e.key.toLowerCase()==='o'){e.preventDefault();$('#fileInput').click();}if(e.ctrlKey&&e.key.toLowerCase()==='n'){e.preventDefault();newDoc();}if(e.ctrlKey&&e.key.toLowerCase()==='h'){e.preventDefault();showFind();}});
   window.addEventListener('beforeunload',()=>saveAuto());
 }
@@ -1256,17 +1256,22 @@ function bindSplitter(){
     const overlay=width<1120;
     workspace.style.setProperty('--workspace-top',workspace.getBoundingClientRect().top+'px');
     workspace.classList.toggle('review-overlay',overlay);
+    const panelWidth=reviewPanelWidth();
+    workspace.style.setProperty('--review-width',panelWidth+'px');
+    $('#reviewResize').setAttribute('aria-valuenow',String(Math.round(panelWidth)));
+    $('#reviewResize').setAttribute('aria-valuemin',String(Math.min(260,panelWidth)));
+    $('#reviewResize').setAttribute('aria-valuemax',String(Math.max(panelWidth,Math.min(640,width<1120?width-24:width-727))));
     if(narrow){workspace.style.removeProperty('grid-template-columns');return;}
-    const reviewWidth=reviewVisible&&!overlay?330:0;
+    const reviewWidth=reviewVisible&&!overlay?panelWidth:0;
     const available=width-reviewWidth-7;
     const pdf=Math.round(Math.max(300,Math.min(available-420,available*ratio)));
-    workspace.style.gridTemplateColumns=pdf+'px 7px minmax(420px,1fr)'+(reviewWidth?' 330px':'');
+    workspace.style.gridTemplateColumns=pdf+'px 7px minmax(420px,1fr)'+(reviewWidth?' '+reviewWidth+'px':'');
     splitter.setAttribute('aria-valuemin','300');splitter.setAttribute('aria-valuemax',String(available-420));splitter.setAttribute('aria-valuenow',String(pdf));
     wordEditor.ui.update();
   };
   const setPosition=x=>{
     const r=workspace.getBoundingClientRect();
-    const reviewWidth=!workspace.classList.contains('panel-hidden')&&!workspace.classList.contains('review-overlay')?330:0;
+    const reviewWidth=!workspace.classList.contains('panel-hidden')&&!workspace.classList.contains('review-overlay')?reviewPanelWidth():0;
     const available=r.width-reviewWidth-7;
     ratio=Math.max(300,Math.min(available-420,x-r.left))/available;layout();
   };
@@ -1309,6 +1314,108 @@ function installPdfImageBridge(){
       wordEditor.editing.view.focus();return true;
     }catch(e){console.error('[PDF image -> CKEditor]',e);return false;}
   };
+}
+
+// Document data is independent of its screen rendering; future sections can reuse this shape.
+const PAGE_SIZES={A4:[210,297],A3:[297,420],Letter:[215.9,279.4]};
+function normalizePageSettings(input={}){
+  input=input&&typeof input==='object'?input:{};
+  const num=(v,f,min,max)=>Number.isFinite(Number(v))?Math.max(min,Math.min(max,Number(v))):f;
+  const size=Object.hasOwn(PAGE_SIZES,input.size)?input.size:input.size==='Custom'?'Custom':'A4';
+  const pair=PAGE_SIZES[size]||[num(input.width,210,80,600),num(input.height,297,80,600)];
+  const orientation=input.orientation==='landscape'?'landscape':'portrait';
+  const [width,height]=orientation==='landscape'?[Math.max(...pair),Math.min(...pair)]:[Math.min(...pair),Math.max(...pair)];
+  const m=input.margins||{};
+  return {mode:input.mode==='pageless'?'pageless':'pages',size,orientation,width,height,margins:{top:num(m.top,20,0,(height-20)/2),bottom:num(m.bottom,20,0,(height-20)/2),left:num(m.left,20,0,(width-20)/2),right:num(m.right,20,0,(width-20)/2)}};
+}
+function renderPageSettings(){
+  if(!wordEditor||!documents[activeDocId])return;
+  const page=documents[activeDocId].pageSettings=normalizePageSettings(documents[activeDocId].pageSettings);
+  const wrap=wordEditor.ui.getEditableElement().closest('.editor-wrap');wrap.dataset.pageMode=page.mode;
+  for(const [key,value] of Object.entries({width:page.width,height:page.height,...page.margins}))wrap.style.setProperty('--page-'+key,value+'mm');
+  wordEditor.ui.update();
+}
+function setupPageSettings(){
+  const modal=$('#pageSettingsDialog');
+  $('#pageSettingsBtn').onclick=()=>{
+    const p=normalizePageSettings(documents[activeDocId].pageSettings);
+    for(const key of ['mode','size','orientation','width','height'])document.getElementById('page-'+key).value=p[key];
+    for(const key of ['top','bottom','left','right'])document.getElementById('page-'+key).value=p.margins[key];
+    sync();modal.showModal();
+  };
+  const sync=()=>{
+    const page=normalizePageSettings({size:$('#page-size').value,orientation:$('#page-orientation').value,width:$('#page-width').value,height:$('#page-height').value});
+    for(const key of ['width','height']){const field=document.getElementById('page-'+key);field.disabled=$('#page-size').value!=='Custom';field.value=page[key];}
+  };
+  $('#page-size').onchange=sync;$('#page-orientation').onchange=sync;
+  $('#pageSettingsCancel').onclick=()=>modal.close();
+  $('#pageSettingsForm').onsubmit=e=>{
+    e.preventDefault();const get=key=>document.getElementById('page-'+key).value;
+    documents[activeDocId].pageSettings=normalizePageSettings({mode:get('mode'),size:get('size'),orientation:get('orientation'),width:get('width'),height:get('height'),margins:Object.fromEntries(['top','bottom','left','right'].map(k=>[k,get(k)]))});
+    renderPageSettings();saveAuto();modal.close();toast('이 문서의 페이지 설정을 저장했습니다.');
+  };
+}
+const REVIEW_WIDTH_KEY='5golgyeo_word.reviewPanelWidth';
+let preferredReviewWidth=330;
+try{const saved=Number(localStorage.getItem(REVIEW_WIDTH_KEY));if(saved>=260)preferredReviewWidth=saved;}catch{}
+function reviewPanelWidth(){
+  const width=$('#workspace').clientWidth;
+  const max=Math.max(180,Math.min(640,width<1120?width-24:width-727));
+  return Math.max(Math.min(260,max),Math.min(max,preferredReviewWidth));
+}
+function setupReviewResize(){
+  const handle=$('#reviewResize');let start=null;
+  const set=value=>{preferredReviewWidth=value;preferredReviewWidth=reviewPanelWidth();try{localStorage.setItem(REVIEW_WIDTH_KEY,String(preferredReviewWidth));}catch{}window.__5golgyeoUpdateLayout?.();};
+  handle.addEventListener('pointerdown',e=>{if(e.button!==0)return;e.preventDefault();start={x:e.clientX,width:reviewPanelWidth()};handle.setPointerCapture(e.pointerId);});
+  handle.addEventListener('pointermove',e=>{if(start)set(start.width+start.x-e.clientX);});
+  for(const event of ['pointerup','pointercancel','lostpointercapture'])handle.addEventListener(event,()=>{start=null;});
+  handle.addEventListener('keydown',e=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();set(e.key==='Home'?260:e.key==='End'?640:reviewPanelWidth()+(e.key==='ArrowLeft'?1:-1)*(e.shiftKey?40:16));});
+}
+// Capture text ranges separately for each real CKEditor block and soft-break line.
+// Empty blocks and non-text objects remain in the model, never reconstructed from plain text.
+function captureKiwiBlocks(snapshot){
+  if(!snapshot)return null;
+  const model=wordEditor.model,root=model.document.getRoot(snapshot.rootName);
+  const range=model.createRange(model.createPositionFromPath(root,snapshot.start),model.createPositionFromPath(root,snapshot.end));
+  const blocks=[];const visit=node=>{
+    if(model.schema.isBlock(node)&&!model.schema.isObject(node)){
+      const part=model.createRangeIn(node).getIntersection(range);
+      if(part){
+        const lines=[];let line={text:'',positions:[],attrs:[],end:part.start};
+        const flush=()=>{lines.push(line);line={text:'',positions:[],attrs:[],end:part.end};};
+        for(const item of part.getItems()){
+          if(item.is('$textProxy')){
+            for(let i=0;i<item.data.length;i++){line.text+=item.data[i];line.positions.push(model.createPositionAt(item.parent,item.startOffset+i));line.attrs.push([...item.getAttributes()]);}
+            line.end=model.createPositionAt(item.parent,item.endOffset);
+          }else if(item.is('element','softBreak')||model.schema.isObject(item))flush();
+        }
+        flush();blocks.push(lines);
+      }
+      return;
+    }
+    for(const child of node.getChildren?.()||[])if(child.is('element'))visit(child);
+  };visit(root);return blocks;
+}
+async function reviewKiwiBlocks(blocks){
+  const results=[];
+  for(const lines of blocks){const row=[];for(const line of lines)row.push(line.text.trim()?await localReviewEngines.kiwi(line.text):{text:line.text,original:line.text});results.push(row);}
+  return {engine:'kiwi',original:blocks.map(b=>b.map(l=>l.text).join('\n')).join('\n\n'),text:results.map(b=>b.map(r=>r.text).join('\n')).join('\n\n'),blockResults:results};
+}
+function applyKiwiWhitespace(blocks,results){
+  const ops=[],model=wordEditor.model;
+  blocks.forEach((lines,b)=>lines.forEach((line,l)=>{
+    const restored=results[b][l].text;if(nonWhitespace(line.text)!==nonWhitespace(restored))throw Error('원문 문자 불일치');
+    const oldChars=[...line.text.matchAll(/\S/gu)],newChars=[...restored.matchAll(/\S/gu)];
+    let oldStart=0,newStart=0;
+    for(let i=0;i<=oldChars.length;i++){
+      const end=oldChars[i]?.index??line.text.length,newEnd=newChars[i]?.index??restored.length;
+      const whitespace=restored.slice(newStart,newEnd);
+      if(line.text.slice(oldStart,end)!==whitespace){ops.push({start:line.positions[oldStart]||line.end,end:line.positions[end]||line.end,text:whitespace,attrs:line.attrs[end]||line.attrs[Math.max(0,oldStart-1)]||[]});}
+      oldStart=end+(oldChars[i]?.[0].length||0);newStart=newEnd+(newChars[i]?.[0].length||0);
+    }
+  }));
+  ops.sort((a,b)=>a.start.isBefore(b.start)?1:a.start.isAfter(b.start)?-1:0);
+  model.change(w=>{for(const op of ops){w.remove(model.createRange(op.start,op.end));if(op.text)w.insertText(op.text,op.attrs,op.start);}});
 }
 
 try{

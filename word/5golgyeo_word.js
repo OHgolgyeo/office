@@ -128,13 +128,104 @@ const {
   Autosave, Plugin, Command, ButtonView, Base64UploadAdapter
 } = CK;
 
+/* Semantic defaults live here. Inline CKEditor formatting takes precedence.
+   Custom style editing is reserved for phase 2; content stores model semantics. */
+const PARAGRAPH_STYLES={
+  paragraph:{label:'일반 텍스트',selector:'p',css:{fontFamily:'"Malgun Gothic",sans-serif',fontSize:'11pt',fontWeight:'400',lineHeight:'1.15',marginTop:'0pt',marginBottom:'6pt'}},
+  documentTitle:{label:'문서 제목',selector:'p.document-title',className:'document-title',css:{fontSize:'28pt',fontWeight:'700',lineHeight:'1.2',marginTop:'18pt',marginBottom:'12pt'}},
+  subtitle:{label:'부제목',selector:'p.document-subtitle',className:'document-subtitle',css:{fontSize:'16pt',fontWeight:'400',lineHeight:'1.3',marginBottom:'12pt'}},
+  heading1:{label:'제목 1',selector:'h1',css:{fontSize:'22pt',fontWeight:'700',lineHeight:'1.25',marginTop:'18pt',marginBottom:'10pt'}},
+  heading2:{label:'제목 2',selector:'h2',css:{fontSize:'18pt',fontWeight:'700',lineHeight:'1.25',marginTop:'16pt',marginBottom:'8pt'}},
+  heading3:{label:'제목 3',selector:'h3',css:{fontSize:'16pt',fontWeight:'700',lineHeight:'1.25',marginTop:'14pt',marginBottom:'6pt'}},
+  heading4:{label:'제목 4',selector:'h4',css:{fontSize:'14pt',fontWeight:'700',lineHeight:'1.3',marginTop:'12pt',marginBottom:'6pt'}},
+  heading5:{label:'제목 5',selector:'h5',css:{fontSize:'12pt',fontWeight:'700',lineHeight:'1.3',marginTop:'10pt',marginBottom:'6pt'}},
+  heading6:{label:'제목 6',selector:'h6',css:{fontSize:'11pt',fontWeight:'700',lineHeight:'1.3',marginTop:'8pt',marginBottom:'6pt'}},
+  quoteParagraph:{label:'인용',selector:'p.quote',className:'quote',css:{fontStyle:'italic',marginLeft:'18pt'}},
+  blockQuote:{label:'블록 인용',selector:'blockquote',css:{marginLeft:'18pt',borderLeft:'3px solid #aaa',paddingLeft:'12pt'}},
+  caption:{label:'캡션',selector:'p.caption',className:'caption',css:{fontSize:'9pt',color:'#666666',marginBottom:'4pt'}},
+  codeParagraph:{label:'코드',selector:'p.code-paragraph',className:'code-paragraph',css:{fontFamily:'Consolas,monospace',fontSize:'10pt',whiteSpace:'pre-wrap',backgroundColor:'#f4f4f4'}}
+};
+function paragraphStyleOptions(){
+  return Object.entries(PARAGRAPH_STYLES).filter(([name])=>name!=='blockQuote').map(([model,s])=>({
+    model,title:s.label,class:'ck-heading_'+model,
+    ...(model==='paragraph'?{}:{view:s.className?{name:'p',classes:s.className}:s.selector,converterPriority:'high'})
+  }));
+}
+function blockStyleName(block){
+  return block?.parent?.name==='blockQuote'?'blockQuote':PARAGRAPH_STYLES[block?.name]?block.name:'paragraph';
+}
+class ParagraphStyleCommand extends Command{
+  refresh(){
+    const blocks=[...this.editor.model.document.selection.getSelectedBlocks()];
+    const names=new Set(blocks.map(blockStyleName));
+    this.value=names.size===1?[...names][0]:'mixed';
+    this.isEnabled=blocks.length>0&&this.editor.commands.get('heading').isEnabled;
+  }
+  execute({value}){
+    if(!PARAGRAPH_STYLES[value])return;
+    const editor=this.editor;
+    editor.model.change(()=>{
+      if(value==='blockQuote')editor.execute('blockQuote',{forceValue:true});
+      else{
+        if(editor.commands.get('blockQuote').isEnabled)editor.execute('blockQuote',{forceValue:false});
+        editor.execute('heading',{value});
+      }
+    });
+  }
+}
+class ParagraphStyles extends Plugin{
+  static get requires(){return [Heading,BlockQuote];}
+  init(){
+    const editor=this.editor,command=new ParagraphStyleCommand(editor);
+    editor.commands.add('paragraphStyle',command);
+    editor.ui.componentFactory.add('paragraphStyle',locale=>{
+      const dropdown=CK.createDropdown(locale),items=new CK.Collection();
+      for(const [value,style] of Object.entries(PARAGRAPH_STYLES)){
+        const model=new CK.ViewModel({label:style.label,withText:true,value});
+        model.bind('isOn').to(command,'value',current=>current===value);
+        items.add({type:'button',model});
+      }
+      CK.addListToDropdown(dropdown,items);
+      dropdown.buttonView.set({withText:true,tooltip:'문단 스타일'});
+      dropdown.buttonView.bind('label').to(command,'value',value=>PARAGRAPH_STYLES[value]?.label||'혼합');
+      dropdown.bind('isEnabled').to(command,'isEnabled');
+      dropdown.on('execute',event=>{editor.execute('paragraphStyle',{value:event.source.value});editor.editing.view.focus();});
+      return dropdown;
+    });
+  }
+}
+function semanticStyleCss(prefix='.ck-content '){
+  return Object.values(PARAGRAPH_STYLES).map(s=>{
+    const css={...PARAGRAPH_STYLES.paragraph.css,...s.css};
+    return `${prefix}${s.selector}{${Object.entries(css).map(([k,v])=>k.replace(/[A-Z]/g,c=>'-'+c.toLowerCase())+':'+v).join(';')}}`;
+  }).join('\n');
+}
+function installSemanticStyles(){
+  const style=document.createElement('style');style.dataset.paragraphStyles='true';
+  style.textContent=semanticStyleCss('.ck-content.ck-editor__editable ');document.head.append(style);
+}
+// Flatten defaults only for export. Stored editor HTML retains separate semantics
+// and direct formatting, so defaults cannot turn into permanent inline overrides.
+function styledExportHtml(){
+  const dom=new DOMParser().parseFromString(currentHtml(),'text/html');
+  for(const el of dom.body.querySelectorAll('p,h1,h2,h3,h4,h5,h6,blockquote')){
+    const definition=Object.values(PARAGRAPH_STYLES).findLast(s=>el.matches(s.selector));
+    const defaults={...PARAGRAPH_STYLES.paragraph.css,...definition?.css};
+    for(const [key,value] of Object.entries(defaults))if(!el.style[key])el.style[key]=value;
+  }
+  return dom.body.innerHTML;
+}
+
 class BlockSpacingCommand extends Command {
   refresh(){
     const firstBlock=this.editor.model.document.selection.getFirstPosition()?.parent;
     this.value=firstBlock ? {
       lineHeight:firstBlock.getAttribute('lineHeight') || null,
       spaceBefore:firstBlock.getAttribute('spaceBefore') || null,
-      spaceAfter:firstBlock.getAttribute('spaceAfter') || null
+      spaceAfter:firstBlock.getAttribute('spaceAfter') || null,
+      firstLineIndent:firstBlock.getAttribute('firstLineIndent')||null,
+      rightIndent:firstBlock.getAttribute('rightIndent')||null,
+      leftIndent:firstBlock.getAttribute('blockIndent')||null
     } : {};
     this.isEnabled=!!firstBlock;
   }
@@ -148,6 +239,13 @@ class BlockSpacingCommand extends Command {
         if(p) blocks.push(p);
       }
       for(const block of blocks){
+        if(!model.schema.isBlock(block))continue;
+        for(const [option,key] of [['firstLineIndent','firstLineIndent'],['rightIndent','rightIndent'],['leftIndent','blockIndent']]){
+          if(options[option]!==undefined&&model.schema.checkAttribute(block,key)){
+            if(options[option]===null||options[option]==='')writer.removeAttribute(key,block);
+            else writer.setAttribute(key,String(options[option]),block);
+          }
+        }
         if(options.lineHeight!==undefined){
           options.lineHeight===null || options.lineHeight==='' ? writer.removeAttribute('lineHeight',block) : writer.setAttribute('lineHeight',String(options.lineHeight),block);
         }
@@ -165,7 +263,7 @@ class BlockSpacingCommand extends Command {
 class BlockSpacing extends Plugin {
   init(){
     const editor=this.editor;
-    editor.model.schema.extend('$block',{allowAttributes:['lineHeight','spaceBefore','spaceAfter']});
+    editor.model.schema.extend('$block',{allowAttributes:['lineHeight','spaceBefore','spaceAfter','firstLineIndent','rightIndent']});
 
     const downcastStyle=(modelKey,cssKey)=>{
       editor.conversion.for('downcast').attributeToAttribute({
@@ -187,6 +285,8 @@ class BlockSpacing extends Plugin {
     downcastStyle('lineHeight','line-height');
     downcastStyle('spaceBefore','margin-top');
     downcastStyle('spaceAfter','margin-bottom');
+    downcastStyle('firstLineIndent','text-indent');
+    downcastStyle('rightIndent','margin-right');
 
     /* Round-trip markers: keep paragraph spacing as real CKEditor model attributes
        even after save -> setData(), while the CSS styles remain exporter-friendly. */
@@ -197,6 +297,8 @@ class BlockSpacing extends Plugin {
     roundTrip('lineHeight','data-line-height');
     roundTrip('spaceBefore','data-space-before');
     roundTrip('spaceAfter','data-space-after');
+    roundTrip('firstLineIndent','data-first-line-indent');
+    roundTrip('rightIndent','data-right-indent');
 
     editor.commands.add('blockSpacing',new BlockSpacingCommand(editor));
     editor.ui.componentFactory.add('blockSpacing',locale=>{
@@ -255,15 +357,10 @@ async function createEditor(){
       BlockQuote, PageBreak, RemoveFormat,
       SpecialCharacters, SpecialCharactersEssentials,
       PasteFromOffice, WordCount, SourceEditing, FindAndReplace, GeneralHtmlSupport,
-      Autosave, BlockSpacing, Base64UploadAdapter
+      Autosave, BlockSpacing, ParagraphStyles, Base64UploadAdapter
     ],
-    toolbar:{items:['undo','redo','|','heading','fontFamily','fontSize','|','bold','italic','underline','strikethrough','fontColor','fontBackgroundColor','|','alignment','bulletedList','numberedList','outdent','indent','blockSpacing','|','insertTable','insertImage','link','removeFormat'],shouldNotGroupWhenFull:false},
-    heading:{options:[
-      {model:'paragraph',title:'본문',class:'ck-heading_paragraph'},
-      {model:'heading1',view:'h1',title:'제목 1',class:'ck-heading_heading1'},
-      {model:'heading2',view:'h2',title:'제목 2',class:'ck-heading_heading2'},
-      {model:'heading3',view:'h3',title:'제목 3',class:'ck-heading_heading3'}
-    ]},
+    toolbar:{items:['undo','redo','|','paragraphStyle','fontFamily','fontSize','|','bold','italic','underline','strikethrough','fontColor','fontBackgroundColor','|','alignment','bulletedList','numberedList','outdent','indent','blockSpacing','|','insertTable','insertImage','link','removeFormat'],shouldNotGroupWhenFull:false},
+    heading:{options:paragraphStyleOptions()},
     fontFamily:{options:fontOptions,supportAllValues:true},
     fontSize:{options:sizeOptions},
     image:{
@@ -284,6 +381,7 @@ async function createEditor(){
   $('#ckeditorToolbar').appendChild(wordEditor.ui.view.toolbar.element);
   wordEditor.ui.focusTracker.add($('#ckeditorToolbar')); 
   const editable=wordEditor.ui.getEditableElement();
+  installSemanticStyles();
   editable.lang='ko';
   editable.spellcheck=true;
   editable.dataset.editorEngine='ckeditor5';
@@ -298,7 +396,7 @@ async function createEditor(){
     if(loadingDocument)return;
     saveActiveDocState();
     updateCount();
-    updateOutline();
+    scheduleOutline();
     if(reviewModeActive && reviewRangeSnapshot) resetReviewSelection();
   });
 
@@ -357,9 +455,9 @@ function loadDocState(id,{saveCurrent=true}={}){
   loadingDocument=true;
   wordEditor.setData(documents[id].html||'<p></p>');
   loadingDocument=false;
+  updateOutline();
   renderTabs();
   updateCount();
-  updateOutline();
   resetReviewSelection({keepStatus:true});
   setStatus(`${documents[id].title} 편집 중`);
 }
@@ -386,21 +484,6 @@ function renderTabs(){
   }
   renderOutlineTabs();
 }
-function renderOutlineTabs(){
-  const box=$('#outlineTabs');
-  if(!box)return;
-  box.replaceChildren();
-  const make=(doc,depth=0)=>{
-    const b=document.createElement('button');
-    b.className='outline-tab-item'+(doc.id===activeDocId?' active':'');
-    b.style.paddingLeft=(10+depth*18)+'px';
-    b.textContent=doc.title;
-    b.onclick=()=>loadDocState(doc.id);
-    box.appendChild(b);
-    Object.values(documents).filter(d=>d.parentId===doc.id).forEach(child=>make(child,depth+1));
-  };
-  Object.values(documents).filter(d=>!d.parentId).forEach(d=>make(d));
-}
 function newTab(parentId=null){
   const id='doc_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,6);
   documents[id]={id,title:parentId?'새 하위 탭':'새 탭',html:'<p></p>',parentId};
@@ -423,20 +506,85 @@ function openTabPopover(id,x,y){
   p.style.left=x+'px';p.style.top=y+'px';p.classList.add('show');
 }
 
-function updateOutline(){
-  const box=$('#outlineHeadings');
-  if(!box || !wordEditor)return;
-  box.replaceChildren();
-  const html=currentHtml();
-  const dom=new DOMParser().parseFromString(html,'text/html');
-  const hs=[...dom.querySelectorAll('h1,h2,h3,h4,h5,h6')];
-  if(!hs.length){
-    const e=document.createElement('div');e.className='outline-empty';e.textContent='제목 스타일을 적용한 문장이 여기에 표시됩니다.';box.appendChild(e);return;
-  }
-  hs.forEach(h=>{
-    const b=document.createElement('button');b.className='outline-heading';b.textContent=h.textContent||'(빈 제목)';b.style.paddingLeft=(8+(Number(h.tagName[1])-1)*12)+'px';box.appendChild(b);
-  });
+let outlineTimer=null,outlineSignature='',activeHeadingEntries=[];
+const outlineCache=new Map(),collapsedOutlineTabs=new Set();
+function collectModelHeadings(root){
+  const entries=[];
+  const visit=node=>{
+    if(/^heading[1-6]$/.test(node.name||'')){
+      const textOf=n=>n.is?.('$text')||n.is?.('$textProxy')?n.data:[...(n.getChildren?.()||[])].map(textOf).join('');
+      entries.push({level:Number(node.name.slice(-1)),text:textOf(node)||'(빈 제목)',path:[...node.getPath()]});
+    }
+    for(const child of node.getChildren?.()||[])if(child.is?.('element'))visit(child);
+  };
+  visit(root);return entries;
 }
+function headingsForTab(doc){
+  if(doc.id===activeDocId)return activeHeadingEntries;
+  const cached=outlineCache.get(doc.id);if(cached?.html===doc.html)return cached.entries;
+  const fragment=wordEditor.data.toModel(wordEditor.data.processor.toView(doc.html||'<p></p>'));
+  const entries=collectModelHeadings(fragment);outlineCache.set(doc.id,{html:doc.html,entries});return entries;
+}
+function appendHeadingTree(box,entries,docId,baseDepth=0){
+  const stack=[];
+  for(const entry of entries){
+    while(stack.length&&stack.at(-1)>=entry.level)stack.pop();
+    const button=document.createElement('button');button.className='outline-heading';
+    button.textContent=entry.text;button.dataset.headingPath=JSON.stringify(entry.path);button.dataset.doc=docId;
+    button.style.paddingLeft=(12+(baseDepth+stack.length)*14)+'px';
+    button.setAttribute('aria-label',`${PARAGRAPH_STYLES['heading'+entry.level].label}: ${entry.text}`);
+    button.onclick=()=>navigateHeading(docId,entry.path);box.append(button);stack.push(entry.level);
+  }
+}
+function navigateHeading(docId,path){
+  if(activeDocId!==docId)loadDocState(docId);
+  const model=wordEditor.model,root=model.document.getRoot();
+  let heading=root;
+  try{for(const offset of path)heading=heading.getChild(heading.offsetToIndex(offset));}catch{return;}
+  if(!/^heading[1-6]$/.test(heading?.name||''))return;
+  wordEditor.editing.view.focus();
+  model.change(writer=>writer.setSelection(heading,0));
+  wordEditor.editing.view.forceRender();
+  const view=wordEditor.editing.mapper.toViewElement(heading);
+  const dom=view&&wordEditor.editing.view.domConverter.mapViewToDom(view);
+  dom?.scrollIntoView({block:'center',behavior:'auto'});
+}
+function scheduleOutline(){clearTimeout(outlineTimer);outlineTimer=setTimeout(updateOutline,180);}
+function updateOutline(){
+  clearTimeout(outlineTimer);
+  if(!wordEditor)return;
+  activeHeadingEntries=collectModelHeadings(wordEditor.model.document.getRoot());
+  outlineCache.set(activeDocId,{html:documents[activeDocId]?.html,entries:activeHeadingEntries});
+  const signature=JSON.stringify([activeDocId,activeHeadingEntries]);
+  if(signature===outlineSignature)return;
+  outlineSignature=signature;
+  const box=$('#outlineHeadings');box.replaceChildren();
+  if(activeHeadingEntries.length)appendHeadingTree(box,activeHeadingEntries,activeDocId);
+  else{const empty=document.createElement('div');empty.className='outline-empty';empty.textContent='제목 스타일을 적용한 문장이 여기에 표시됩니다.';box.append(empty);}
+  renderOutlineTabs();
+}
+function renderOutlineTabs(){
+  const box=$('#outlineTabs');if(!box||!wordEditor)return;box.replaceChildren();
+  const visited=new Set();
+  const make=(doc,depth=0)=>{
+    if(visited.has(doc.id))return;visited.add(doc.id);
+    const row=document.createElement('div');row.className='outline-tab-row';
+    row.style.paddingLeft=(depth*14)+'px';
+    const toggle=document.createElement('button'),button=document.createElement('button');
+    const expanded=!collapsedOutlineTabs.has(doc.id);
+    toggle.className='outline-tab-toggle';toggle.textContent=expanded?'▾':'▸';toggle.setAttribute('aria-expanded',String(expanded));toggle.setAttribute('aria-label',doc.title+' 목차 펼치기/접기');
+    toggle.onclick=()=>{expanded?collapsedOutlineTabs.add(doc.id):collapsedOutlineTabs.delete(doc.id);renderOutlineTabs();};
+    button.className='outline-tab-item'+(doc.id===activeDocId?' active':'');button.textContent=doc.title;button.dataset.doc=doc.id;
+    button.onclick=()=>{collapsedOutlineTabs.delete(doc.id);if(activeDocId!==doc.id)loadDocState(doc.id);else renderOutlineTabs();};
+    button.oncontextmenu=e=>{e.preventDefault();openTabPopover(doc.id,e.clientX,e.clientY);};
+    row.append(toggle,button);box.append(row);
+    if(expanded)appendHeadingTree(box,headingsForTab(doc),doc.id,depth+1);
+    Object.values(documents).filter(d=>d.parentId===doc.id).forEach(child=>make(child,depth+1));
+  };
+  Object.values(documents).filter(d=>!d.parentId||!documents[d.parentId]).forEach(d=>make(d));
+  Object.values(documents).filter(d=>!visited.has(d.id)).forEach(d=>make(d));
+}
+
 
 /* --------------------------------------------------------------------------
    Toolbar -> CKEditor commands
@@ -476,9 +624,10 @@ let spacingReturnFocus=null;
 function openSpacingDialog(){
   const value=wordEditor.commands.get('blockSpacing').value||{};
   spacingReturnFocus=document.activeElement;
-  $('#customLineHeight').value=parseFloat(value.lineHeight)||1.7;
+  $('#customLineHeight').value=parseFloat(value.lineHeight)||parseFloat(PARAGRAPH_STYLES[blockStyleName(wordEditor.model.document.selection.getFirstPosition()?.parent)]?.css.lineHeight)||1.15;
   $('#customSpaceBefore').value=parseFloat(value.spaceBefore)||0;
   $('#customSpaceAfter').value=parseFloat(value.spaceAfter)||0;
+  for(const key of ['FirstLine','Left','Right'])document.getElementById(`custom${key}Indent`).value=cssNumber(value[key==='FirstLine'?'firstLineIndent':key.toLowerCase()+'Indent'])||0;
   $('#spacingPreset').value=['1','1.15','1.5','2'].includes(String(value.lineHeight))?String(value.lineHeight):'';
   $('#lineSpacingModal').classList.add('show');$('#lineSpacingModal').classList.remove('hidden');
   $('#customLineHeight').focus();
@@ -502,7 +651,8 @@ function bindSpacingUi(){
     const lh=Math.max(.5,Math.min(5,parseFloat($('#customLineHeight').value)||1.15));
     const before=Math.max(0,Math.min(200,parseFloat($('#customSpaceBefore').value)||0));
     const after=Math.max(0,Math.min(200,parseFloat($('#customSpaceAfter').value)||0));
-    close();exec('blockSpacing',{lineHeight:String(lh),spaceBefore:before+'pt',spaceAfter:after+'pt'});
+    const indents={};for(const key of ['FirstLine','Left','Right'])indents[key==='FirstLine'?'firstLineIndent':key.toLowerCase()+'Indent']=Math.max(-200,Math.min(200,parseFloat(document.getElementById(`custom${key}Indent`).value)||0))+'pt';
+    close();exec('blockSpacing',{lineHeight:String(lh),spaceBefore:before+'pt',spaceAfter:after+'pt',...indents});
   };
 }
 
@@ -524,7 +674,7 @@ function saveProjectAs(){
   saveProject(name.replace(/\.5gw\.json$/i,''));
 }
 function htmlDocument(){
-  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${xmlEsc(baseName())}</title><style>body{font-family:"Malgun Gothic",sans-serif;max-width:210mm;margin:auto;padding:20mm}img{max-width:100%}table{border-collapse:collapse}td,th{border:1px solid #999;padding:4px}</style></head><body data-5golgyeo-document>${currentHtml()}</body></html>`;
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${xmlEsc(baseName())}</title><style>body{font-family:"Malgun Gothic",sans-serif;max-width:210mm;margin:auto;padding:20mm}img{max-width:100%}table{border-collapse:collapse}td,th{border:1px solid #999;padding:4px}</style></head><body data-5golgyeo-document>${styledExportHtml()}</body></html>`;
 }
 function textToMarkdown(){
   const dom=new DOMParser().parseFromString(currentHtml(),'text/html');
@@ -533,7 +683,7 @@ function textToMarkdown(){
     if(node.nodeType!==Node.ELEMENT_NODE)return '';
     const inner=[...node.childNodes].map(walk).join('');
     switch(node.tagName){
-      case 'H1':return `# ${inner}\n\n`;case 'H2':return `## ${inner}\n\n`;case 'H3':return `### ${inner}\n\n`;
+      case 'H4':return `#### ${inner}\n\n`;case 'H5':return `##### ${inner}\n\n`;case 'H6':return `###### ${inner}\n\n`;case 'H1':return `# ${inner}\n\n`;case 'H2':return `## ${inner}\n\n`;case 'H3':return `### ${inner}\n\n`;
       case 'STRONG':case 'B':return `**${inner}**`;case 'EM':case 'I':return `*${inner}*`;
       case 'BR':return '\n';case 'P':return `${inner}\n\n`;case 'LI':return `- ${inner}\n`;case 'BLOCKQUOTE':return `> ${inner}\n\n`;
       default:return inner;
@@ -548,7 +698,7 @@ async function exportHwpx(){
   setStatus('HWPX 변환 중…');
   const mod=await import('https://cdn.jsdelivr.net/npm/@ssabrojs/hwpxjs@0.4.0/dist/browser/hwpxjs.browser.mjs');
   if(typeof mod.htmlToHwpx!=='function')throw new Error('hwpxjs의 htmlToHwpx를 찾지 못했습니다.');
-  const bytes=await mod.htmlToHwpx(currentHtml(),{title:baseName(),creator:'5golgyeo_word'});
+  const bytes=await mod.htmlToHwpx(styledExportHtml(),{title:baseName(),creator:'5golgyeo_word'});
   downloadBlob(new Blob([bytes],{type:'application/hwp+zip'}),baseName()+'.hwpx');
 }
 function cssNumber(styleValue){
@@ -562,16 +712,23 @@ function dataUriBytes(src){
   if(src.includes(';base64,')){const bin=atob(m[2]);return Uint8Array.from(bin,c=>c.charCodeAt(0));}
   return new TextEncoder().encode(decodeURIComponent(m[2]));
 }
+function docxColor(value){
+  if(!value)return undefined;
+  const hex=String(value).match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if(hex)return hex[1].length===3?[...hex[1]].map(c=>c+c).join(''):hex[1];
+  const rgb=String(value).match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+  return rgb?rgb.slice(1,4).map(n=>Math.max(0,Math.min(255,Number(n))).toString(16).padStart(2,'0')).join(''):undefined;
+}
 async function exportDocx(){
   setStatus('DOCX 변환 중…');
   const D=await import('https://cdn.jsdelivr.net/npm/docx@9.7.1/+esm');
   const {Document,Packer,Paragraph,TextRun,Table:DocxTable,TableRow,TableCell,ImageRun,PageBreak,AlignmentType,UnderlineType,WidthType}=D;
-  const dom=new DOMParser().parseFromString(currentHtml(),'text/html');
+  const dom=new DOMParser().parseFromString(styledExportHtml(),'text/html');
 
   const inheritedStyle=(el)=>{
     const style={};let p=el;
     while(p&&p!==dom.body){
-      if(p.style){for(const k of ['fontFamily','fontSize','color','backgroundColor','fontWeight','fontStyle','textDecoration','lineHeight','marginTop','marginBottom','textAlign'])if(!style[k]&&p.style[k])style[k]=p.style[k];}
+      if(p.style){for(const k of ['fontFamily','fontSize','color','backgroundColor','fontWeight','fontStyle','textDecoration','lineHeight','marginTop','marginBottom','marginLeft','marginRight','textIndent','textAlign'])if(!style[k]&&p.style[k])style[k]=p.style[k];}
       p=p.parentElement;
     }
     return style;
@@ -583,7 +740,7 @@ async function exportDocx(){
         if(!n.nodeValue)return;
         const st=inheritedStyle(n.parentElement);
         const sizePt=cssNumber(st.fontSize);
-        out.push(new TextRun({text:n.nodeValue,bold:/bold|[6-9]00/.test(st.fontWeight||'')||!!n.parentElement.closest('strong,b'),italics:st.fontStyle==='italic'||!!n.parentElement.closest('em,i'),strike:!!n.parentElement.closest('s,strike'),underline:n.parentElement.closest('u')?{type:UnderlineType.SINGLE}:undefined,color:st.color?.replace('#',''),font:(st.fontFamily||'Malgun Gothic').split(',')[0].replace(/["']/g,'').trim(),size:sizePt?Math.round(sizePt*2):22}));
+        out.push(new TextRun({text:n.nodeValue,bold:/bold|[6-9]00/.test(st.fontWeight||'')||!!n.parentElement.closest('strong,b'),italics:st.fontStyle==='italic'||!!n.parentElement.closest('em,i'),strike:!!n.parentElement.closest('s,strike'),underline:n.parentElement.closest('u')?{type:UnderlineType.SINGLE}:undefined,color:docxColor(st.color),shading:docxColor(st.backgroundColor)?{fill:docxColor(st.backgroundColor)}:undefined,font:(st.fontFamily||'Malgun Gothic').split(',')[0].replace(/["']/g,'').trim(),size:sizePt?Math.round(sizePt*2):22}));
         return;
       }
       if(n.nodeType!==Node.ELEMENT_NODE)return;
@@ -598,7 +755,7 @@ async function exportDocx(){
     const lh=parseFloat(st.lineHeight);const before=cssNumber(st.marginTop);const after=cssNumber(st.marginBottom);
     const children=inlineRuns(el);
     if(!children.length)children.push(new TextRun(''));
-    return new Paragraph({children,alignment:map[st.textAlign]||undefined,spacing:{before:before?Math.round(before*20):undefined,after:after?Math.round(after*20):undefined,line:Number.isFinite(lh)?Math.round(lh*240):undefined,lineRule:Number.isFinite(lh)?'auto':undefined}});
+    return new Paragraph({children,heading:/^H[1-6]$/.test(el.tagName)?D.HeadingLevel['HEADING_'+el.tagName[1]]:el.classList.contains('document-title')?D.HeadingLevel.TITLE:undefined,style:el.classList.contains('document-subtitle')?'Subtitle':undefined,alignment:map[st.textAlign]||undefined,spacing:{before:before?Math.round(before*20):undefined,after:after?Math.round(after*20):undefined,line:Number.isFinite(lh)?Math.round(lh*240):undefined,lineRule:Number.isFinite(lh)?'auto':undefined}});
   };
   const blocks=[];
   for(const el of [...dom.body.children]){
@@ -630,7 +787,7 @@ function rtfEsc(s){return String(s).replace(/\\/g,'\\\\').replace(/[{}]/g,m=>'\\
 async function exportPdf(){
   const html=htmlDocument();
   const w=window.open('','_blank');if(!w)throw new Error('팝업이 차단되었습니다.');
-  w.document.write(`<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${xmlEsc(baseName())}</title><style>@page{size:A4;margin:18mm}body{font-family:"Malgun Gothic",sans-serif}img{max-width:100%}table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:4px}</style><script src="https://unpkg.com/pagedjs/dist/paged.polyfill.js"><\/script></head><body>${currentHtml()}<script>window.addEventListener('load',()=>setTimeout(()=>window.print(),900));<\/script></body></html>`);
+  w.document.write(`<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${xmlEsc(baseName())}</title><style>@page{size:A4;margin:18mm}body{font-family:"Malgun Gothic",sans-serif}img{max-width:100%}table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:4px}</style><script src="https://unpkg.com/pagedjs/dist/paged.polyfill.js"><\/script></head><body>${styledExportHtml()}<script>window.addEventListener('load',()=>setTimeout(()=>window.print(),900));<\/script></body></html>`);
   w.document.close();
 }
 async function doExport(type){

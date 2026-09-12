@@ -958,11 +958,7 @@ function setupKiwiUi(){
   $('#kiwiInsertBtn').addEventListener('click',()=>{
     if(!kiwiResult||kiwiBusy||pendingReviewSelection?.mode!=='pdf'||!wordEditor)return;
     try{
-      wordEditor.editing.view.focus();
-      wordEditor.model.change(()=>{
-        const view=wordEditor.data.processor.toView(textAsEditorHtml(kiwiResult.text));
-        wordEditor.model.insertContent(wordEditor.data.toModel(view));
-      });
+      insertPdfPlainText(kiwiResult.text);
       toast('복원된 문장을 커서 위치에 붙여넣었습니다.');
     }catch{toast('본문에 커서를 두고 다시 시도해 주세요.');}
   });
@@ -1154,6 +1150,37 @@ window.__5golgyeoPdfLineSelectionChanged=text=>{
   if(!text||!text.trim())return;
   captureReviewSelection(text,null);
 };
+// Insert final PDF plain text using the live CKEditor selection, not HTML upcasting.
+function insertPdfPlainText(text){
+  if(!wordEditor||wordEditor.isReadOnly)throw new Error('편집할 수 없는 문서입니다.');
+  const model=wordEditor.model,selection=model.document.selection,schema=model.schema;
+  const inline=[...selection.getAttributes()].filter(([key])=>schema.checkAttribute('$text',key));
+  const firstBlock=[...selection.getSelectedBlocks()][0];
+  let block=selection.getFirstPosition()?.parent;
+  if(!block||!schema.isBlock(block)||!schema.checkChild(block,'$text'))block=firstBlock;
+  const blockName=block&&schema.isBlock(block)&&schema.checkChild(block,'$text')?block.name:'paragraph';
+  const blockKeys=['lineHeight','spaceBefore','spaceAfter','firstLineIndent','blockIndent','rightIndent','alignment'];
+  const attrs=blockKeys.filter(key=>block?.hasAttribute(key)&&schema.checkAttribute(blockName,key)).map(key=>[key,block.getAttribute(key)]);
+  // A blank line separates paragraphs; repeated blank paragraphs and soft breaks survive.
+  const paragraphs=String(text).replace(/\r\n?/g,'\n').split('\n\n');
+  model.change(writer=>{
+    const fragment=writer.createDocumentFragment();
+    for(const paragraphText of paragraphs){
+      const paragraph=writer.createElement(blockName,attrs);writer.append(paragraph,fragment);
+      const lines=paragraphText.split('\n');
+      lines.forEach((line,index)=>{
+        if(index)writer.appendElement('softBreak',paragraph);
+        if(line)writer.appendText(line,inline,paragraph);
+      });
+    }
+    model.insertContent(fragment,selection);
+    // Preserve explicit current typing state, including disabled bold/italic.
+    for(const key of [...selection.getAttributeKeys()])writer.removeSelectionAttribute(key);
+    for(const [key,value] of inline)writer.setSelectionAttribute(key,value);
+  });
+  wordEditor.editing.view.focus();
+}
+
 function textAsEditorHtml(text){
   const paras=String(text).split(/\n{2,}/).map(p=>`<p>${xmlEsc(p).replace(/\n/g,'<br>')}</p>`);return paras.join('')||'<p></p>';
 }
@@ -1162,12 +1189,7 @@ function applyReviewedText(){
   const model=wordEditor.model;
   if(reviewResultMode==='pdf'){
     try{
-      wordEditor.editing.view.focus();
-      model.change(()=>{
-        const viewFrag=wordEditor.data.processor.toView(textAsEditorHtml(currentCleaned));
-        const modelFrag=wordEditor.data.toModel(viewFrag);
-        model.insertContent(modelFrag); // 현재 커서(선택) 위치에 삽입
-      });
+      insertPdfPlainText(currentCleaned);
       resetReviewSelection();toast('커서 위치에 붙여넣었습니다.');
     }catch(e){console.error(e);toast('붙여넣기에 실패했습니다. 본문에 커서를 두고 다시 시도해 주세요.');}
     return;

@@ -695,16 +695,17 @@ let reviewPanelMessage='검수할 텍스트를 선택하세요.';
 
 // App integration only. Kiwi's upstream spacing algorithm runs in a lazy worker.
 let kiwiWorker=null,kiwiCall=null,kiwiSerial=0,kiwiSelectionVersion=0;
-let kiwiBusy=false,kiwiResult=null,kiwiMessage='PDF 원문을 선택한 뒤 로컬 복원을 눌러 주세요.';
+let kiwiBusy=false,kiwiResult=null,kiwiMessage='텍스트를 선택한 뒤 검수를 눌러 주세요.';
 const kiwiWorkerUrl=new URL('vendor/kiwi/5golgyeo_word_kiwi_worker.js?v=20260912-kiwi-1',import.meta.url);
 function resetKiwiSelection(){
   kiwiSelectionVersion++;kiwiResult=null;
-  kiwiMessage=kiwiBusy?'이전 선택 영역의 처리를 마치는 중…':'PDF 원문을 선택한 뒤 로컬 복원을 눌러 주세요.';
+  kiwiMessage=kiwiBusy?'이전 선택 영역의 처리를 마치는 중…':'텍스트를 선택한 뒤 검수를 눌러 주세요.';
 }
 function updateKiwiUi(){
   const panel=$('#kiwiPanel');if(!panel)return;
-  panel.classList.toggle('hidden',reviewSourceMode!=='pdf');
-  const usable=reviewModeActive&&pendingReviewSelection?.mode==='pdf'&&!!pendingReviewSelection.text.trim();
+  panel.classList.remove('hidden');
+  $('#kiwiInsertBtn').hidden=reviewSourceMode!=='pdf';
+  const usable=reviewModeActive&&!!pendingReviewSelection?.text.trim();
   $('#kiwiRestoreBtn').disabled=!usable||kiwiBusy||!!reviewInFlight;
   $('#kiwiApplyBtn').disabled=!usable||!kiwiResult||kiwiResult.applied||kiwiBusy||!!reviewInFlight;
   $('#kiwiInsertBtn').disabled=!usable||!kiwiResult||kiwiBusy||!!reviewInFlight;
@@ -740,36 +741,69 @@ function requestKiwi(text){
     kiwiWorker.postMessage({id,type:'space',text});
   });
 }
+// Local engines return data; rendering and explicit application are separate.
+// Future spelling engine can be added here without changing the Kiwi worker.
+const localReviewEngines={kiwi:async text=>{
+  const result=await requestKiwi(text);
+  if(nonWhitespace(text)!==nonWhitespace(result.text))throw new Error('원문의 글자 변경이 감지되어 결과를 적용하지 않았습니다.');
+  if(JSON.stringify(text.match(/\r\n|\r|\n/g)||[])!==JSON.stringify(result.text.match(/\r\n|\r|\n/g)||[]))throw new Error('줄 경계 변경이 감지되었습니다.');
+  return {engine:'kiwi',original:text,text:result.text};
+}};
+function presentLocalReview(result,selection){
+  kiwiResult={...result,selection,applied:false};
+  kiwiMessage='띄어쓰기 복원이 끝났습니다. 원문과 비교한 뒤 복원 적용을 눌러 주세요.';
+  updateKiwiUi();
+}
+async function runLocalReview(){
+  if(kiwiBusy)return toast('현재 검수가 끝난 뒤 다시 실행해 주세요.');
+  const selection=pendingReviewSelection,version=kiwiSelectionVersion;
+  if(!selection?.text.trim())return toast('검수할 텍스트를 먼저 선택해 주세요. PDF는 검수 패널의 PDF 모드에서 선택해 주세요.');
+  kiwiBusy=true;kiwiResult=null;kiwiMessage='한국어 텍스트 복원기를 준비하는 중…';updateKiwiUi();
+  try{
+    const result=await localReviewEngines.kiwi(selection.text);
+    if(version!==kiwiSelectionVersion||selection!==pendingReviewSelection||selection.docId!==activeDocId)return;
+    presentLocalReview(result,selection);
+  }catch(error){if(version===kiwiSelectionVersion)kiwiMessage=`로컬 복원 오류: ${error.message}`;}
+  finally{kiwiBusy=false;updateKiwiUi();}
+}
+function enterLocalReview(){
+  const text=selectionText(),snapshot=snapshotSelection();
+  if(!reviewModeActive)toggleReview(true);
+  if(text.trim()&&snapshot){setReviewMode('editor');captureReviewSelection(text,snapshot);collapseVisibleReviewSelection(snapshot);}
+  return runLocalReview();
+}
+function applyKiwiResult(){
+  const result=kiwiResult,selection=pendingReviewSelection;
+  if(!result||result.applied||kiwiBusy||result.selection!==selection||selection.docId!==activeDocId)return;
+  if(selection.mode==='pdf'){
+    // PDF bytes are immutable here; apply to the selected text in the panel.
+    pendingReviewSelection={...selection,text:result.text};
+    kiwiResult={...result,selection:pendingReviewSelection,applied:true};
+    kiwiMessage='복원된 문장을 선택 텍스트에 적용했습니다. PDF 원본은 유지됩니다.';
+    updateReviewRequestUi();return;
+  }
+  if(!selection.snapshot||selection.documentHtml!==currentHtml()){
+    resetReviewSelection();return toast('문서가 변경되었습니다. 텍스트를 다시 선택해 검수해 주세요.');
+  }
+  try{
+    const model=wordEditor.model,root=model.document.getRoot(selection.snapshot.rootName);
+    model.change(writer=>{
+      const start=writer.createPositionFromPath(root,selection.snapshot.start);
+      const end=writer.createPositionFromPath(root,selection.snapshot.end);
+      writer.remove(writer.createRange(start,end));
+      const view=wordEditor.data.processor.toView(textAsEditorHtml(result.text));
+      model.insertContent(wordEditor.data.toModel(view),start);
+    });
+    resetReviewSelection();toast('선택 영역에 띄어쓰기 복원 결과를 적용했습니다.');
+  }catch{resetReviewSelection();toast('선택 영역을 적용할 수 없습니다. 다시 선택해 주세요.');}
+}
 function setupKiwiUi(){
-  $('#kiwiRestoreBtn').addEventListener('click',async()=>{
-    if(kiwiBusy||reviewInFlight||pendingReviewSelection?.mode!=='pdf')return;
-    const selection=pendingReviewSelection,version=kiwiSelectionVersion;
-    kiwiBusy=true;kiwiResult=null;kiwiMessage='한국어 텍스트 복원기를 준비하는 중…';updateKiwiUi();
-    try{
-      const result=await requestKiwi(selection.text);
-      if(version!==kiwiSelectionVersion||selection!==pendingReviewSelection)return;
-      kiwiResult={original:selection.text,text:result.text,applied:false};
-      kiwiMessage='띄어쓰기 복원이 끝났습니다. 원문과 비교한 뒤 복원 적용을 눌러 주세요.';
-    }catch(error){
-      if(version===kiwiSelectionVersion)kiwiMessage=`로컬 복원 오류: ${error.message}`;
-    }finally{
-      kiwiBusy=false;
-      if(version!==kiwiSelectionVersion)kiwiMessage='현재 선택 영역을 복원하려면 로컬 복원을 눌러 주세요.';
-      updateKiwiUi();
-    }
-  });
-  $('#kiwiApplyBtn').addEventListener('click',()=>{
-    if(!kiwiResult||kiwiBusy||reviewInFlight||pendingReviewSelection?.mode!=='pdf')return;
-    const result=kiwiResult;
-    // Reuse the existing snapshot/stale-result machinery.
-    captureReviewSelection(result.text,null);
-    kiwiResult={...result,applied:true};
-    kiwiMessage='복원된 문장을 검수 입력에 적용했습니다. PDF 파일 원본은 유지됩니다.';
-    reviewPanelMessage='복원된 문장이 선택 원문에 적용되었습니다. 커서 위치에 붙여넣을 수 있습니다.';
-    updateReviewRequestUi();
-  });
+  $('#reviewBtn').addEventListener('pointerdown',e=>e.preventDefault());
+  $('#reviewBtn').addEventListener('click',enterLocalReview);
+  $('#kiwiRestoreBtn').addEventListener('click',runLocalReview);
+  $('#kiwiApplyBtn').addEventListener('click',applyKiwiResult);
   $('#kiwiInsertBtn').addEventListener('click',()=>{
-    if(!kiwiResult||kiwiBusy||reviewInFlight||pendingReviewSelection?.mode!=='pdf'||!wordEditor)return;
+    if(!kiwiResult||kiwiBusy||pendingReviewSelection?.mode!=='pdf'||!wordEditor)return;
     try{
       wordEditor.editing.view.focus();
       wordEditor.model.change(()=>{
@@ -793,9 +827,9 @@ function captureReviewSelection(text,snapshot){
      JSON.stringify(pendingReviewSelection.snapshot)===JSON.stringify(snapshot))return;
   // Invalidate previous results and abort their request before accepting a new selection.
   resetReviewSelection({keepStatus:true});
-  pendingReviewSelection={text,snapshot,mode:reviewSourceMode,docId:activeDocId};
+  pendingReviewSelection={text,snapshot,mode:reviewSourceMode,docId:activeDocId,documentHtml:currentHtml()};
   reviewRangeSnapshot=snapshot;
-  reviewPanelMessage='선택 영역을 저장했습니다. PDF 모드에서 로컬 복원을 사용할 수 있습니다.';
+  reviewPanelMessage='선택 영역을 저장했습니다. 검수를 눌러 띄어쓰기를 복원하세요.';
   $('#cleanPreview').textContent='PDF 모드의 로컬 복원을 사용하세요.';
   setStatus('선택 영역 저장됨');
   updateReviewRequestUi();

@@ -1,0 +1,52 @@
+Kiwi integration for 5golgyeo_word — 2026-09-12
+
+Kiwi: Copyright (c) 2017 Minchul Lee and contributors.
+Official source: https://github.com/bab2min/Kiwi
+Version reported by WASM: 0.23.2
+Source commit: 38cd9f1c38983e6b05be0b6823826bd1dd5466d4
+
+The upstream LICENSE says LGPL-2.1-or-later. README says LGPL v3;
+the maintainer acknowledges this discrepancy in issue #269.
+This distribution uses the LGPL v3 option for Kiwi and its binding.
+Both LGPL v3 and GPL v3 texts, upstream notice, and LGPL 2.1 text are included.
+The proposed Apache relicensing is NOT applied to this version.
+
+Core algorithms, kiwi_wasm.cpp, and TypeScript binding source are unchanged.
+Only bindings/wasm/CMakeLists.txt changes the shell quoting of
+EXPORTED_RUNTIME_METHODS=FS to permit Windows linking; same exported API.
+space() and glue() already exist in this pinned official commit.
+The npm 0.23.0 binary was not used.
+
+Our worker and UI integration are separate from upstream/. The worker loads
+the model, invokes upstream space(), validates non-whitespace characters,
+and protects contiguous notation from inserted spaces. It is not a replacement
+spacing algorithm. New integration code may be used under LGPL-3.0-or-later.
+This does not change any existing application, CKEditor, or MuPDF license.
+
+Corresponding source and build instructions are supplied separately as
+5golgyeo_word_kiwi_source_separate.zip. This runtime archive does not contain them.
+The distributor must publish that source package with equivalent free access
+and add its actual public download URL here before public distribution.
+Recipients can rebuild and replace upstream/build/kiwi-wasm.js,
+upstream/kiwi-wasm.wasm and wrapper JS without changing the application.
+Do not impose restrictions on modification/replacement or reverse engineering
+needed to debug modifications to this library. Preserve license/copyright notices.
+If redistributing a modified library, include the modified corresponding source.
+
+Third-party components in the build (see licenses/ and source archive):
+cpp-btree: Apache-2.0; nlohmann/json: MIT; streamvbyte: Apache-2.0.
+Eigen: primarily MPL-2.0, with separately licensed files; MPL/Apache/BSD/MINPACK notices are preserved.
+Unused Eigen GPL/LGPL license duplicates and disabled mimalloc notices are excluded. Emscripten runtime: MIT / UIUC-NCSA; libc/libc++/compiler
+runtime notices (including LLVM exceptions and musl notices) are also included.
+
+MODELS ARE NOT INCLUDED IN THIS DISTRIBUTION.
+The official v0.23.2 cong/base model is downloaded only on first local recovery.
+Exact URLs, sizes and SHA-256 checksums are in model_manifest.json.
+The model is cached locally in browser Cache Storage when available.
+No selected text is placed in URLs, requests, logs or browser persistent storage
+by this Kiwi adapter. Only static official model files are downloaded.
+The model has not been relabeled LGPL or Apache by this project.
+The maintainer says model terms are separate and follow source-corpus terms:
+https://github.com/bab2min/Kiwi/issues/269
+Self-hosting/repackaging the model remains deferred until redistribution terms
+are clarified. Automatic download is not a claim of unrestricted model licensing.

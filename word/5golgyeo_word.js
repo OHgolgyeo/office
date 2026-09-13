@@ -932,13 +932,35 @@ function requestKiwi(text){
     kiwiWorker.postMessage({id,type:'space',text});
   });
 }
+// The Kiwi worker deliberately never touches an explicit line boundary (so a
+// real paragraph break in the selection always survives). But when a PDF uses
+// justified/균등분할 spacing, an unusually wide word-gap can come back from
+// Adobe's copy/selection as if it were a line break in the first place (the
+// same "extreme gap becomes its own line" behavior is reproducible with plain
+// MuPDF text extraction on the same kind of PDF) - and once that happens, the
+// worker's per-line restoration has no way to ever re-join it, because it
+// never looks across a line boundary. Reuse the same tail/head join probe as
+// the document-mode softBreak handling (reviewLineBreakJoin, defined below)
+// to decide, per boundary, whether such a break should become a space, no
+// separator at all, or stay untouched - never touching a real blank-line
+// paragraph gap, and only ever changing whitespace (never other characters).
+async function bridgeFalseLineBreaks(text){
+  const parts=text.split(/(\r\n|\r|\n)/u);
+  for(let i=1;i<parts.length-1;i+=2){
+    const sep=await reviewLineBreakJoin(parts[i-1],parts[i+1]);
+    if(sep!=null)parts[i]=sep;
+  }
+  return parts.join('');
+}
 // Local engines return data; rendering and explicit application are separate.
 // Future spelling engine can be added here without changing the Kiwi worker.
 const localReviewEngines={kiwi:async text=>{
   const result=await requestKiwi(text);
   if(nonWhitespace(text)!==nonWhitespace(result.text))throw new Error('원문의 글자 변경이 감지되어 결과를 적용하지 않았습니다.');
   if(JSON.stringify(text.match(/\r\n|\r|\n/g)||[])!==JSON.stringify(result.text.match(/\r\n|\r|\n/g)||[]))throw new Error('줄 경계 변경이 감지되었습니다.');
-  return {engine:'kiwi',original:text,text:result.text};
+  const bridged=await bridgeFalseLineBreaks(result.text);
+  if(nonWhitespace(bridged)!==nonWhitespace(result.text))throw new Error('경계 병합 중 글자 변경이 감지되어 결과를 적용하지 않았습니다.');
+  return {engine:'kiwi',original:text,text:bridged};
 }};
 function presentLocalReview(result,selection){
   kiwiResult={...result,selection,applied:false};

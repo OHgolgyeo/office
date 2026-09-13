@@ -885,7 +885,7 @@ let reviewPanelMessage='';
 // App integration only. Kiwi's upstream spacing algorithm runs in a lazy worker.
 let kiwiWorker=null,kiwiCall=null,kiwiSerial=0,kiwiSelectionVersion=0;
 let kiwiBusy=false,kiwiResult=null,kiwiMessage='';
-const kiwiWorkerUrl=new URL('vendor/kiwi/5golgyeo_word_kiwi_worker.js?v=20260912-kiwi-1',import.meta.url);
+const kiwiWorkerUrl=new URL('vendor/kiwi/5golgyeo_word_kiwi_worker.js?v=20260913-hash-fix',import.meta.url);
 function resetKiwiSelection(){
   kiwiSelectionVersion++;kiwiResult=null;
   kiwiMessage=kiwiBusy?'이전 선택 영역의 처리를 마치는 중…':'';

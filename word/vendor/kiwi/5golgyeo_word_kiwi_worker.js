@@ -42,6 +42,18 @@ async function initialize(id){
   const kiwi=await builder.build({modelFiles,modelType:'cong',loadTypoDict:false});
   return {kiwi,version:builder.version(),initMs:performance.now()-start};
 }
+// A literal '#' (item/handout numbering like "#1", "#7:") makes the upstream
+// Kiwi WASM tokenizer give up on spacing for the rest of that line entirely -
+// confirmed directly: "가나다#1라마바" comes back completely untouched, while
+// "가나다1라마바" (same text, no '#') restores correctly. Swapping '#' for the
+// full-width '＃' before calling space() and back afterward sidesteps this
+// without touching Kiwi itself; a real '#' never survives a round trip
+// through space() unmodified, so this substitution is otherwise invisible.
+const HASH_PLACEHOLDER='＃';
+function spaceSafe(kiwi,line){
+  const safe=line.replace(/#/gu,HASH_PLACEHOLDER);
+  return kiwi.space(safe,false).replace(new RegExp(HASH_PLACEHOLDER,'gu'),'#');
+}
 self.onmessage=async({data})=>{
   const {id,text}=data;
   try{
@@ -49,7 +61,7 @@ self.onmessage=async({data})=>{
     if(!kiwiPromise)kiwiPromise=initialize(id).catch(error=>{kiwiPromise=null;throw error;});
     const state=await kiwiPromise,start=performance.now();
     // Stage 1 deliberately preserves all explicit line/paragraph boundaries.
-    const result=text.split(/(\r\n|\r|\n)/u).map(line=>/^[\r\n]+$/u.test(line)||!line.trim()?line:protectNotation(line,state.kiwi.space(line,false))).join('');
+    const result=text.split(/(\r\n|\r|\n)/u).map(line=>/^[\r\n]+$/u.test(line)||!line.trim()?line:protectNotation(line,spaceSafe(state.kiwi,line))).join('');
     self.postMessage({id,type:'result',text:result,version:state.version,initMs:state.initMs,spaceMs:performance.now()-start});
   }catch(error){self.postMessage({id,type:'error',message:error.message||'로컬 복원에 실패했습니다.'});}
 };

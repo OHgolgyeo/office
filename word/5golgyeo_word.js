@@ -270,16 +270,25 @@ class BlockSpacing extends Plugin {
         model:modelKey,
         view:value=>({key:'style',value:{[cssKey]:String(value)}})
       });
-      // Read exported CSS back into the command's model attributes. Two downcast
-      // converters for the same attribute cannot both consume the same event.
+      // Read exported CSS back into the command's model attributes. This must
+      // run and consume the style BEFORE GeneralHtmlSupport's own (low-priority,
+      // by GHS design) upcast does, or GHS caches the same CSS value into
+      // htmlPAttributes/htmlSpan alongside our model attribute. That stale cache
+      // is invisible on screen but wins on every future save/data-downcast, which
+      // is why changing line-height (etc.) on old documents looked like it
+      // "didn't save" even though the model and editing view were correct.
       editor.conversion.for('upcast').add(dispatcher=>{
         dispatcher.on('element',(event,data,api)=>{
+          if(!data.modelRange)return;
+          if(!api.consumable.test(data.viewItem,{styles:[cssKey]}))return;
           const value=data.viewItem.getStyle(cssKey);
-          if(!value||!data.modelRange)return;
+          if(!value)return;
+          let applied=false;
           for(const item of data.modelRange.getItems({shallow:true})){
-            if(api.schema.checkAttribute(item,modelKey))api.writer.setAttribute(modelKey,value,item);
+            if(api.schema.checkAttribute(item,modelKey)){api.writer.setAttribute(modelKey,value,item);applied=true;}
           }
-        },{priority:'low'});
+          if(applied)api.consumable.consume(data.viewItem,{styles:[cssKey]});
+        },{priority:'high'});
       });
     };
     downcastStyle('lineHeight','line-height');
@@ -411,6 +420,27 @@ async function createEditor(){
 }
 
 function currentHtml(){ return wordEditor?.getData?.() || ''; }
+// Legacy (나루 시절) documents sometimes wrap text in a bare <font family/size>
+// tag nested inside a normal fontFamily span. GeneralHtmlSupport preserves that
+// as an opaque htmlFont attribute, and its explicit style keeps visually
+// overriding the model's fontFamily/fontSize even after the user re-applies
+// those commands to the same range. Folding the <font> tag's own (currently
+// winning) style onto a plain <span> hands it to CKEditor's native Font
+// feature instead, with no visible change and no data loss.
+function normalizeLegacyFontHtml(html){
+  if(!html||!/<font[\s>]/i.test(html))return html;
+  try{
+    const dom=new DOMParser().parseFromString(html,'text/html');
+    dom.body.querySelectorAll('font').forEach(font=>{
+      const span=dom.createElement('span');
+      if(font.style.fontFamily)span.style.fontFamily=font.style.fontFamily;
+      if(font.style.fontSize)span.style.fontSize=font.style.fontSize;
+      while(font.firstChild)span.appendChild(font.firstChild);
+      font.replaceWith(span);
+    });
+    return dom.body.innerHTML;
+  }catch{return html;}
+}
 function saveActiveDocState(){
   if(!wordEditor || loadingDocument)return;
   if(documents[activeDocId]) documents[activeDocId].html=currentHtml();
@@ -453,7 +483,7 @@ function loadDocState(id,{saveCurrent=true}={}){
   if(saveCurrent) saveActiveDocState();
   activeDocId=id;
   loadingDocument=true;
-  wordEditor.setData(documents[id].html||'<p></p>');
+  wordEditor.setData(normalizeLegacyFontHtml(documents[id].html||'<p></p>'));
   loadingDocument=false;
   renderPageSettings();
   updateOutline();
@@ -827,7 +857,7 @@ async function openFile(file){
     }else{
       const text=await file.text();html='<p>'+xmlEsc(text).replace(/\n/g,'<br>')+'</p>';
     }
-    loadingDocument=true;await wordEditor.setData(html||'<p></p>');loadingDocument=false;documents[activeDocId].html=currentHtml();setActiveDocTitle(file.name.replace(/\.[^.]+$/,''));updateCount();toast('문서를 열었습니다.');
+    loadingDocument=true;await wordEditor.setData(normalizeLegacyFontHtml(html||'<p></p>'));loadingDocument=false;documents[activeDocId].html=currentHtml();setActiveDocTitle(file.name.replace(/\.[^.]+$/,''));updateCount();toast('문서를 열었습니다.');
   }catch(e){console.error(e);alert(`파일 열기 실패\n\n${e.message}`);}
 }
 
@@ -850,15 +880,15 @@ let currentSuggestionRanges=[];
 // Selection capture and request execution are deliberately separate.
 let pendingReviewSelection=null;
 let reviewInFlight=null;
-let reviewPanelMessage='검수할 텍스트를 선택하세요.';
+let reviewPanelMessage='';
 
 // App integration only. Kiwi's upstream spacing algorithm runs in a lazy worker.
 let kiwiWorker=null,kiwiCall=null,kiwiSerial=0,kiwiSelectionVersion=0;
-let kiwiBusy=false,kiwiResult=null,kiwiMessage='텍스트를 선택한 뒤 검수를 눌러 주세요.';
+let kiwiBusy=false,kiwiResult=null,kiwiMessage='';
 const kiwiWorkerUrl=new URL('vendor/kiwi/5golgyeo_word_kiwi_worker.js?v=20260912-kiwi-1',import.meta.url);
 function resetKiwiSelection(){
   kiwiSelectionVersion++;kiwiResult=null;
-  kiwiMessage=kiwiBusy?'이전 선택 영역의 처리를 마치는 중…':'텍스트를 선택한 뒤 검수를 눌러 주세요.';
+  kiwiMessage=kiwiBusy?'이전 선택 영역의 처리를 마치는 중…':'';
 }
 function updateKiwiUi(){
   const panel=$('#kiwiPanel');if(!panel)return;
@@ -868,9 +898,11 @@ function updateKiwiUi(){
   $('#kiwiRestoreBtn').disabled=!usable||kiwiBusy||!!reviewInFlight;
   $('#kiwiApplyBtn').disabled=!usable||!kiwiResult||kiwiResult.applied||kiwiBusy||!!reviewInFlight;
   $('#kiwiInsertBtn').disabled=!usable||!kiwiResult||kiwiBusy||!!reviewInFlight;
+  // Status line stays hidden for normal/idle/success states; only busy progress
+  // and error text (both non-empty) are worth interrupting the user with.
   $('#kiwiStatus').textContent=kiwiMessage;
+  $('#kiwiStatus').hidden=!kiwiMessage;
   $('#kiwiResultBox').classList.toggle('hidden',!kiwiResult);
-  $('#kiwiOriginal').textContent=kiwiResult?.original||'';
   $('#kiwiResult').textContent=kiwiResult?.text||'';
 }
 function requestKiwi(text){
@@ -910,7 +942,7 @@ const localReviewEngines={kiwi:async text=>{
 }};
 function presentLocalReview(result,selection){
   kiwiResult={...result,selection,applied:false};
-  kiwiMessage='띄어쓰기 복원이 끝났습니다. 원문과 비교한 뒤 복원 적용을 눌러 주세요.';
+  kiwiMessage='';
   updateKiwiUi();
 }
 async function runLocalReview(){
@@ -938,8 +970,8 @@ function applyKiwiResult(){
     // PDF bytes are immutable here; apply to the selected text in the panel.
     pendingReviewSelection={...selection,text:result.text};
     kiwiResult={...result,selection:pendingReviewSelection,applied:true};
-    kiwiMessage='복원된 문장을 선택 텍스트에 적용했습니다. PDF 원본은 유지됩니다.';
-    updateReviewRequestUi();return;
+    kiwiMessage='';
+    updateReviewRequestUi();toast('복원된 문장을 선택 텍스트에 적용했습니다. PDF 원본은 유지됩니다.');return;
   }
   if(!selection.snapshot||selection.documentHtml!==currentHtml()){
     resetReviewSelection();return toast('문서가 변경되었습니다. 텍스트를 다시 선택해 검수해 주세요.');
@@ -966,7 +998,9 @@ function setupKiwiUi(){
 
 function updateReviewRequestUi(){
   updateKiwiUi();
-  $('#reviewRequestStatus').textContent=reviewPanelMessage;
+  // reviewPanelMessage only ever carries normal/idle prompts (never errors),
+  // so the status line stays hidden; the preview below already shows the state.
+  $('#reviewRequestStatus').hidden=true;
   $('#reviewSourceTitle').textContent=reviewSourceMode==='pdf'?(kiwiResult?.applied?'검수할 PDF 텍스트 · 복원 적용됨':'선택된 PDF 원문'):'선택된 본문 원문';
   $('#reviewSelectedSource').textContent=pendingReviewSelection?.text||'아직 선택된 텍스트가 없습니다.';
 }
@@ -1150,11 +1184,19 @@ window.__5golgyeoPdfLineSelectionChanged=text=>{
   if(!text||!text.trim())return;
   captureReviewSelection(text,null);
 };
+// Only these are real CKEditor formatting commands. Copying every
+// schema-permitted $text attribute would also drag along legacy
+// GeneralHtmlSupport passthrough attributes (htmlFont, htmlSpan, htmlA, ...)
+// that a mixed-origin document may still carry on the caret position, and
+// those visually override the standard attributes below (see
+// normalizeLegacyFontHtml). PDF text should inherit the caret's real
+// formatting, not whatever legacy wrapper happens to sit under it.
+const PDF_INSERT_INLINE_ATTRS=new Set(['bold','italic','underline','strikethrough','subscript','superscript','code','fontFamily','fontSize','fontColor','fontBackgroundColor','linkHref']);
 // Insert final PDF plain text using the live CKEditor selection, not HTML upcasting.
 function insertPdfPlainText(text){
   if(!wordEditor||wordEditor.isReadOnly)throw new Error('편집할 수 없는 문서입니다.');
   const model=wordEditor.model,selection=model.document.selection,schema=model.schema;
-  const inline=[...selection.getAttributes()].filter(([key])=>schema.checkAttribute('$text',key));
+  const inline=[...selection.getAttributes()].filter(([key])=>PDF_INSERT_INLINE_ATTRS.has(key)&&schema.checkAttribute('$text',key));
   const firstBlock=[...selection.getSelectedBlocks()][0];
   let block=selection.getFirstPosition()?.parent;
   if(!block||!schema.isBlock(block)||!schema.checkChild(block,'$text'))block=firstBlock;
@@ -1403,39 +1445,88 @@ function captureKiwiBlocks(snapshot){
     if(model.schema.isBlock(node)&&!model.schema.isObject(node)){
       const part=model.createRangeIn(node).getIntersection(range);
       if(part){
-        const lines=[];let line={text:'',positions:[],attrs:[],end:part.start};
-        const flush=()=>{lines.push(line);line={text:'',positions:[],attrs:[],end:part.end};};
+        const lines=[];let line={text:'',positions:[],attrs:[],end:part.start,breakAfter:null};
+        // breakAfter records the actual softBreak model element ending this line
+        // (null when the block simply ends, or an embedded object caused the
+        // split) so a later pass can decide whether to remove that element.
+        const flush=(breakAfter=null)=>{line.breakAfter=breakAfter;lines.push(line);line={text:'',positions:[],attrs:[],end:part.end,breakAfter:null};};
         for(const item of part.getItems()){
           if(item.is('$textProxy')){
             for(let i=0;i<item.data.length;i++){line.text+=item.data[i];line.positions.push(model.createPositionAt(item.parent,item.startOffset+i));line.attrs.push([...item.getAttributes()]);}
             line.end=model.createPositionAt(item.parent,item.endOffset);
-          }else if(item.is('element','softBreak')||model.schema.isObject(item))flush();
+          }else if(item.is('element','softBreak'))flush(item);
+          else if(model.schema.isObject(item))flush(null);
         }
-        flush();blocks.push(lines);
+        flush(null);blocks.push(lines);
       }
       return;
     }
     for(const child of node.getChildren?.()||[])if(child.is('element'))visit(child);
   };visit(root);return blocks;
 }
+// A PDF page-width wrap turns into a softBreak line inside the same paragraph.
+// Kiwi's own space-restoration already knows how to decide whether two
+// fragments joined with no separator form one word ("들어"+"서면"->"들어서면")
+// or need a space between them ("회색"+"물체"), so reuse it on just the
+// boundary text instead of guessing with fixed rules. Returns null when the
+// boundary should be left alone (blank spacer line, or the probe isn't safe).
+async function reviewLineBreakJoin(tail,head){
+  if(!tail.trim()||!head.trim())return null;
+  const probe=tail+head;
+  let restored;
+  try{restored=(await requestKiwi(probe)).text;}catch{return null;}
+  if(nonWhitespace(probe)!==nonWhitespace(restored))return null;
+  // Kiwi may also "fix" spacing elsewhere inside tail/head (a separate,
+  // known accuracy limitation) which changes the overall string length
+  // without touching the seam at all. Only the character Kiwi placed
+  // exactly at the tail/head junction decides this boundary.
+  const targetNonWs=nonWhitespace(tail).length;
+  let seen=0,seamIndex=-1;
+  for(let i=0;i<restored.length;i++){
+    if(!/\s/u.test(restored[i])){seen++;if(seen===targetNonWs){seamIndex=i;break;}}
+  }
+  if(seamIndex<0)return null;
+  return /\s/u.test(restored[seamIndex+1]||'')?' ':'';
+}
 async function reviewKiwiBlocks(blocks){
   const results=[];
-  for(const lines of blocks){const row=[];for(const line of lines)row.push(line.text.trim()?await localReviewEngines.kiwi(line.text):{text:line.text,original:line.text});results.push(row);}
-  return {engine:'kiwi',original:blocks.map(b=>b.map(l=>l.text).join('\n')).join('\n\n'),text:results.map(b=>b.map(r=>r.text).join('\n')).join('\n\n'),blockResults:results};
+  for(const lines of blocks){
+    const row=[];
+    for(const line of lines)row.push(line.text.trim()?await localReviewEngines.kiwi(line.text):{text:line.text,original:line.text});
+    const joins=[];
+    for(let i=0;i<lines.length-1;i++){
+      if(!(lines[i].breakAfter?.is?.('element','softBreak'))){joins.push(null);continue;}
+      const tail=lines[i].text.replace(/\s+$/u,''),head=lines[i+1].text.replace(/^\s+/u,'');
+      joins.push(await reviewLineBreakJoin(tail,head));
+    }
+    results.push({row,joins});
+  }
+  const joinedBlockText=({row,joins})=>row.map((r,i)=>r.text+(i<joins.length?(joins[i]??'\n'):'')).join('');
+  return {engine:'kiwi',original:blocks.map(b=>b.map(l=>l.text).join('\n')).join('\n\n'),text:results.map(joinedBlockText).join('\n\n'),blockResults:results};
 }
 function applyKiwiWhitespace(blocks,results){
   const ops=[],model=wordEditor.model;
-  blocks.forEach((lines,b)=>lines.forEach((line,l)=>{
-    const restored=results[b][l].text;if(nonWhitespace(line.text)!==nonWhitespace(restored))throw Error('원문 문자 불일치');
-    const oldChars=[...line.text.matchAll(/\S/gu)],newChars=[...restored.matchAll(/\S/gu)];
-    let oldStart=0,newStart=0;
-    for(let i=0;i<=oldChars.length;i++){
-      const end=oldChars[i]?.index??line.text.length,newEnd=newChars[i]?.index??restored.length;
-      const whitespace=restored.slice(newStart,newEnd);
-      if(line.text.slice(oldStart,end)!==whitespace){ops.push({start:line.positions[oldStart]||line.end,end:line.positions[end]||line.end,text:whitespace,attrs:line.attrs[end]||line.attrs[Math.max(0,oldStart-1)]||[]});}
-      oldStart=end+(oldChars[i]?.[0].length||0);newStart=newEnd+(newChars[i]?.[0].length||0);
-    }
-  }));
+  blocks.forEach((lines,b)=>{
+    const {row,joins}=results[b];
+    lines.forEach((line,l)=>{
+      const restored=row[l].text;if(nonWhitespace(line.text)!==nonWhitespace(restored))throw Error('원문 문자 불일치');
+      const oldChars=[...line.text.matchAll(/\S/gu)],newChars=[...restored.matchAll(/\S/gu)];
+      let oldStart=0,newStart=0;
+      for(let i=0;i<=oldChars.length;i++){
+        const end=oldChars[i]?.index??line.text.length,newEnd=newChars[i]?.index??restored.length;
+        const whitespace=restored.slice(newStart,newEnd);
+        if(line.text.slice(oldStart,end)!==whitespace){ops.push({start:line.positions[oldStart]||line.end,end:line.positions[end]||line.end,text:whitespace,attrs:line.attrs[end]||line.attrs[Math.max(0,oldStart-1)]||[]});}
+        oldStart=end+(oldChars[i]?.[0].length||0);newStart=newEnd+(newChars[i]?.[0].length||0);
+      }
+    });
+    joins.forEach((sep,i)=>{
+      if(sep==null)return;
+      const breakEl=lines[i].breakAfter;if(!breakEl)return;
+      const start=lines[i].end,end=model.createPositionAfter(breakEl);
+      const attrs=lines[i].attrs[lines[i].attrs.length-1]||lines[i+1]?.attrs[0]||[];
+      ops.push({start,end,text:sep,attrs});
+    });
+  });
   ops.sort((a,b)=>a.start.isBefore(b.start)?1:a.start.isAfter(b.start)?-1:0);
   model.change(w=>{for(const op of ops){w.remove(model.createRange(op.start,op.end));if(op.text)w.insertText(op.text,op.attrs,op.start);}});
 }

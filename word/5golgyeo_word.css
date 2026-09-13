@@ -574,11 +574,12 @@
 }
 
 
-/* ===== 검수 패널 고정 폭 + 내부 스크롤 ===== */
+/* ===== 검수 패널 내부 스크롤 =====
+   실제 너비는 JS(reviewPanelWidth/setupReviewResize)가 grid track 또는
+   --review-width 변수로 결정한다. 여기서 고정 width를 주면 리사이즈가
+   grid 칸만 바뀌고 패널 자체는 옆으로 밀리는 버그가 생긴다. */
 #reviewPanel{
-  width:330px;
-  min-width:330px;
-  max-width:330px;
+  min-width:0;
   box-sizing:border-box;
   overflow:hidden;
 }
@@ -1133,7 +1134,11 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 #pdfAdobeSettings #pdfRestoreLast{display:inline-block;width:auto;margin:0;padding:0}
 
 /* Optional PDF local spacing panel */
-.kiwi-panel{margin:12px 0;padding:12px;border:1px solid var(--line,#ddd);border-radius:8px}.kiwi-panel p{font-size:12px;line-height:1.6}.kiwi-panel .preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:200px;overflow:auto;margin:6px 0 12px}.kiwi-panel .actions{flex-wrap:wrap;gap:6px}
+.review-selection-card{border-radius:12px}
+.review-selection-card>h3,.kiwi-panel h3{font-size:13px;margin:0 0 8px;font-weight:700;color:var(--text)}
+.kiwi-analyze-row{display:flex;justify-content:center;margin:10px 0}
+.kiwi-divider{border:0;border-top:1px solid var(--line);margin:10px 0}
+.kiwi-panel{margin:0}.kiwi-panel p{font-size:12px;line-height:1.6}.kiwi-panel .preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:200px;overflow:auto;margin:6px 0 12px}.kiwi-panel .actions{flex-wrap:wrap;gap:6px}
 
 #kiwiPanel.hidden,#kiwiResultBox.hidden{display:none}
 

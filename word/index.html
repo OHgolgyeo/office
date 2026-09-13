@@ -133,30 +133,28 @@
     </div>
   </div>
 
-  <aside class="review hidden" id="reviewPanel"><div id="reviewResize" role="separator" tabindex="0" aria-label="검수 패널 너비" aria-orientation="vertical"></div>
+  <aside class="review hidden" id="reviewPanel"><div id="reviewResize" role="separator" tabindex="0" aria-label="교정 및 교열 패널 너비" aria-orientation="vertical"></div>
     <div class="review-head">
-      <b>로컬 검수</b>
+      <b>교정 및 교열</b>
       <div class="review-mode-toggle" role="group" aria-label="검수 모드 선택">
         <button type="button" id="reviewModeEditor" class="review-mode-btn active" data-mode="editor">문서 모드</button>
         <button type="button" id="reviewModePdf" class="review-mode-btn" data-mode="pdf">PDF 모드</button>
       </div>
-      <button  id="closeReview" data-icon="x" aria-label="검수 닫기" class="icon-button"></button>
+      <button  id="closeReview" data-icon="x" aria-label="교정 및 교열 닫기" class="icon-button"></button>
     </div>
     <div class="review-body">
-      <div class="card review-selection-card"><h3 id="reviewSourceTitle">선택된 본문 원문</h3><div class="body">
+      <div class="review-selection-card"><h3 id="reviewSourceTitle">선택된 본문 원문</h3><div class="body">
         <div id="reviewSelectedSource" class="preview">아직 선택된 텍스트가 없습니다.</div>
-        <section id="kiwiPanel" class="kiwi-panel hidden" aria-label="Kiwi 로컬 띄어쓰기 복원">
-          <div class="actions"><button id="kiwiRestoreBtn" type="button" disabled>검수</button></div>
-          <p id="kiwiStatus" role="status" aria-live="polite">텍스트를 선택한 뒤 검수를 눌러 주세요.</p>
+        <section id="kiwiPanel" class="kiwi-panel hidden" aria-label="띄어쓰기 복원">
+          <div class="kiwi-analyze-row"><button id="kiwiRestoreBtn" type="button" disabled>분석</button></div>
+          <hr class="kiwi-divider">
+          <p id="kiwiStatus" role="status" aria-live="polite" hidden></p>
           <div id="kiwiResultBox" class="hidden">
-            <strong>원문</strong><div id="kiwiOriginal" class="preview"></div>
-            <strong>Kiwi 띄어쓰기 복원 결과</strong><div id="kiwiResult" class="preview"></div>
+            <h3>띄어쓰기 복원</h3><div id="kiwiResult" class="preview"></div>
             <div class="actions"><button id="kiwiApplyBtn" type="button" disabled>복원 적용</button><button id="kiwiInsertBtn" type="button" disabled>커서 위치에 붙여넣기</button></div>
           </div>
-          <p class="muted">API 키 없이 띄어쓰기를 복원합니다. 복원 적용 전에는 원문이 바뀌지 않습니다. PDF 모드에서는 선택 텍스트에 적용하고 본문에 붙여넣을 수 있습니다.</p>
         </section>
-        
-        <div id="reviewRequestStatus" role="status" aria-live="polite">검수할 텍스트를 선택하세요.</div>
+        <div id="reviewRequestStatus" role="status" aria-live="polite" hidden></div>
       </div></div>
       <div class="card" hidden><h3>줄바꿈 정제 결과</h3><div class="body">
         <div id="cleanPreview" class="preview">본문에서 검수할 영역을 드래그해 선택하세요.</div>

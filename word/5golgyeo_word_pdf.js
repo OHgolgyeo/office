@@ -15,6 +15,8 @@ console.info('[5golgyeo_word_pdf] build 20260912-pdf-restore-1');
   let previewPage=null,cropSession=null,analysisTimer=null;
   let lineSelectActive=false,selectionRequest=0,lastSelection='';
   const cropHistory=new Map();
+  const downloadItems=new Map(),downloadSelection=new Set();
+  let downloadBusy=false;
   // Local PDF persistence is confined to IndexedDB. No PDF bytes go to localStorage.
   const RECENT_PDF_DB='5golgyeo-local-pdf';
   let recentDbPromise=null,recentQueue=Promise.resolve(),recentEpoch=0,recentSettingsRevision=0;
@@ -155,14 +157,14 @@ console.info('[5golgyeo_word_pdf] build 20260912-pdf-restore-1');
   function clearLineSelection(){selectionRequest++;lastSelection='';}
   window.__5golgyeoClearPdfLineSelection=clearLineSelection;
   window.__5golgyeoSetPdfLineSelectMode=active=>{lineSelectActive=!!active;clearLineSelection();};
-  async function forwardSelection(generation){
+  async function forwardSelection(generation,selectionData){
     if(!lineSelectActive||!adobeAPIs)return;
     const request=++selectionRequest,apis=adobeAPIs;
     try{
       const result=await apis.getSelectedContent();
       if(generation!==documentGeneration||request!==selectionRequest||!lineSelectActive)return;
       const text=typeof result?.data==='string'?result.data:'';
-      if(text.trim()&&text!==lastSelection){lastSelection=text;window.__5golgyeoPdfLineSelectionChanged?.(text);}
+      if(text.trim()){lastSelection=text;window.__5golgyeoPdfLineSelectionChanged?.(text,{generation,request,startPage:Number(selectionData?.startPageNumber)||currentPage,endPage:Number(selectionData?.endPageNumber)||currentPage});}
     }catch(error){if(generation===documentGeneration)console.warn('[Adobe selection]',error);}
   }
   function changePage(number){
@@ -170,7 +172,7 @@ console.info('[5golgyeo_word_pdf] build 20260912-pdf-restore-1');
     if(!Number.isInteger(page)||page<1||page===currentPage)return;
     currentPage=page;clearLineSelection();rememberPdfPage(page);
     if(imageMode){
-      imageRequest++;clearTimeout(analysisTimer);clearPreview();imageList.replaceChildren();
+      imageRequest++;clearTimeout(analysisTimer);clearPreview();imageList.replaceChildren();resetDownloads();
       imageStatus.textContent=`${page}쪽 이미지 준비 중…`;
       analysisTimer=setTimeout(()=>{if(imageMode)refreshImageThumbnails();},120);
     }
@@ -208,7 +210,7 @@ console.info('[5golgyeo_word_pdf] build 20260912-pdf-restore-1');
       view.registerCallback(window.AdobeDC.View.Enum.CallbackType.EVENT_LISTENER,event=>{
         if(generation!==documentGeneration)return;
         if(event.type==='CURRENT_ACTIVE_PAGE'||event.type==='PAGE_VIEW')changePage(event.data?.pageNumber);
-        if(event.type==='PREVIEW_SELECTION_END')forwardSelection(generation);
+        if(event.type==='PREVIEW_SELECTION_END')forwardSelection(generation,event.data);
         if(event.type==='APP_RENDERING_DONE')showMessage('');
         if(event.type==='APP_RENDERING_FAILED')showMessage('PDF를 표시하지 못했습니다. Client ID·등록 도메인과 PDF 파일을 확인한 뒤 다시 열어 주세요.');
       },{enablePDFAnalytics:true,enableFilePreviewEvents:true,listenOn:['CURRENT_ACTIVE_PAGE','PAGE_VIEW','PREVIEW_SELECTION_END','APP_RENDERING_DONE','APP_RENDERING_FAILED']});
@@ -243,6 +245,29 @@ console.info('[5golgyeo_word_pdf] build 20260912-pdf-restore-1');
     if(!muPdfInitPromise)muPdfInitPromise=import('https://cdn.jsdelivr.net/npm/mupdf@1.28.1/dist/mupdf.js')
       .then(mu=>{muPdfLib=mu;return mu;}).catch(error=>{muPdfInitPromise=null;throw error;});
     return muPdfInitPromise;
+  }
+  async function reconstructSelection(text,context,join){
+    const fallback=reason=>({text,boundaries:[],hints:[],status:reason});
+    if(!context||context.generation!==documentGeneration||!pdfBytes)return fallback('layout-unavailable');
+    if(text.length>50000||context.endPage<context.startPage||context.endPage-context.startPage>9)return fallback('selection-too-large');
+    let doc;
+    try{
+      const mu=await ensureMuPdf();
+      if(context.generation!==documentGeneration)return fallback('selection-stale');
+      // Independent short-lived handle: image tray closing cannot destroy this analysis.
+      doc=mu.Document.openDocument(new Uint8Array(pdfBytes),'application/pdf');
+      if(doc.needsPassword())return fallback('encrypted-layout-unavailable');
+      const pages=[];
+      for(let n=context.startPage;n<=context.endPage;n++){
+        if(n<1||n>doc.countPages())return fallback('invalid-page');
+        const page=doc.loadPage(n-1);
+        try{pages.push(window.PdfLayout.extractPage(page,n));}finally{page.destroy();}
+      }
+      const result=await window.PdfLayout.reconstruct(text,pages,join);
+      if(context.generation!==documentGeneration||context.request!==selectionRequest)return fallback('selection-stale');
+      return result;
+    }catch(error){console.warn('[PDF layout]',error?.message);return fallback('layout-unavailable');}
+    finally{doc?.destroy();}
   }
   function pixmapToCanvas(pixmap){
     const width=pixmap.getWidth(),height=pixmap.getHeight();
@@ -306,7 +331,7 @@ console.info('[5golgyeo_word_pdf] build 20260912-pdf-restore-1');
   function insertThumbnail(payload,button){
     const ok=window.__5golgyeoInsertPdfImage?.(payload.src,payload.width,payload.height,null,payload);
     if(ok){
-      imageList.querySelectorAll('button').forEach(el=>el.setAttribute('aria-pressed',String(el===button)));
+      imageList.querySelectorAll('.pdf-image-thumbnail').forEach(el=>el.setAttribute('aria-pressed',String(el===button)));
       status(`PDF 이미지 삽입 완료 · ${payload.width}×${payload.height}px`);
     }else status('이미지를 삽입하지 못했습니다. 본문 편집기가 준비되었는지 확인해 주세요.');
   }
@@ -422,7 +447,7 @@ console.info('[5golgyeo_word_pdf] build 20260912-pdf-restore-1');
   function setImageTrayOpen(open){
     if(open&&(!pdfBytes||!adobeAPIs)){status('Adobe에서 PDF를 먼저 열어 주세요.');return;}
     imageMode=!!open;imageRequest++;clearTimeout(analysisTimer);
-    clearPreview();imageList.replaceChildren();
+    clearPreview();imageList.replaceChildren();resetDownloads();
     imageTray.hidden=!open;$pdf('pdfPane').classList.toggle('images-open',open);
     imagesBtn.setAttribute('aria-expanded',String(open));
     if(!open){try{muDocument?.destroy();}catch{}muDocument=null;}
@@ -437,6 +462,48 @@ console.info('[5golgyeo_word_pdf] build 20260912-pdf-restore-1');
     button.addEventListener('lostpointercapture',removeNativeImageDragGhost);
     button.addEventListener('click',e=>{if(e.detail===0&&imageMode)insertThumbnail(payload,button);});
   }
+  function resetDownloads(){downloadItems.clear();downloadSelection.clear();updateDownloads();}
+  function updateDownloads(){
+    $pdf('pdfImageSelectionCount').textContent=`${downloadSelection.size}개 선택`;
+    $pdf('pdfDownloadSelected').disabled=downloadBusy||!downloadSelection.size;
+    imageList.querySelectorAll('.pdf-image-select').forEach(input=>{input.checked=downloadSelection.has(input.dataset.key);});
+  }
+  function safePdfName(){
+    return (pdfFile?.name||'document.pdf').replace(/\.pdf$/i,'').replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').replace(/[. ]+$/g,'').slice(0,100)||'document';
+  }
+  function imageFilename(payload,index){
+    const ext=payload.src.startsWith('data:image/jpeg')?'jpg':'png';
+    return `${safePdfName()}_p${String(payload.pageNumber).padStart(3,'0')}_${payload.source==='crop'?'crop':'img'}${String(index+1).padStart(3,'0')}.${ext}`;
+  }
+  async function payloadBlob(payload){
+    if(payload.blob instanceof Blob)return payload.blob;
+    // Decode the existing extraction result without canvas conversion or lossy re-encoding.
+    const response=await fetch(payload.src);if(!response.ok)throw Error('Image data unavailable');return response.blob();
+  }
+  function downloadBlob(blob,name){
+    const url=URL.createObjectURL(blob),a=document.createElement('a');
+    a.href=url;a.download=name;document.body.append(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),30000);
+  }
+  async function downloadImages(items){
+    if(downloadBusy||!items.length)return;
+    downloadBusy=true;updateDownloads();
+    const name=safePdfName();
+    try{
+      if(items.length===1)downloadBlob(await payloadBlob(items[0].payload),items[0].name);
+      else{
+        if(!window.JSZip)throw Error('ZIP 도구를 불러오지 못했습니다. 연결을 확인해 주세요.');
+        const zip=new window.JSZip();
+        for(const item of items)zip.file(item.name,await payloadBlob(item.payload));
+        downloadBlob(await zip.generateAsync({type:'blob',compression:'STORE'}),`${name}_images.zip`);
+      }
+      status(`${items.length}개 이미지 다운로드를 요청했습니다.`);
+    }catch(error){status('이미지 저장 실패 · '+error.message);}
+    finally{downloadBusy=false;updateDownloads();}
+  }
+  $pdf('pdfSelectAllImages').addEventListener('click',()=>{for(const key of downloadItems.keys())downloadSelection.add(key);updateDownloads();});
+  $pdf('pdfDeselectImages').addEventListener('click',()=>{downloadSelection.clear();updateDownloads();});
+  $pdf('pdfDownloadSelected').addEventListener('click',()=>downloadImages([...downloadSelection].map(key=>downloadItems.get(key)).filter(Boolean)));
   function addThumbnail(payload,index){
     const button=document.createElement('button');button.type='button';button.className='pdf-image-thumbnail';
     button.setAttribute('aria-pressed','false');
@@ -444,7 +511,16 @@ console.info('[5golgyeo_word_pdf] build 20260912-pdf-restore-1');
     const img=document.createElement('img');img.src=payload.src;img.alt='';img.draggable=false;
     const label=document.createElement('span');label.textContent=`${payload.source==='crop'?'페이지 잘라오기':'원본 객체'} · ${payload.width}×${payload.height}`;
     button.dataset.source=payload.source;button.title=payload.detail||label.textContent;button.append(img,label);
-    bindImageButton(button,payload);imageList.append(button);
+    bindImageButton(button,payload);
+    const card=document.createElement('div');card.className='pdf-image-item';
+    const key=`${payload.pageNumber}:${index}`,name=imageFilename(payload,index);
+    downloadItems.set(key,{payload,name});
+    const controls=document.createElement('div');controls.className='pdf-image-item-actions';
+    const select=document.createElement('input');select.type='checkbox';select.className='pdf-image-select';select.dataset.key=key;
+    select.setAttribute('aria-label',`${name} 선택`);select.addEventListener('change',()=>{select.checked?downloadSelection.add(key):downloadSelection.delete(key);updateDownloads();});
+    const save=document.createElement('button');save.type='button';save.textContent='저장';save.setAttribute('aria-label',`${name} 저장`);
+    save.addEventListener('click',()=>downloadImages([{payload,name}]));
+    controls.append(select,save);card.append(button,controls);imageList.append(card);updateDownloads();
   }
   function renderMuPage(page,maxScale=1.5){
     const bounds=page.getBounds(),width=bounds[2]-bounds[0],height=bounds[3]-bounds[1];
@@ -472,7 +548,7 @@ console.info('[5golgyeo_word_pdf] build 20260912-pdf-restore-1');
   async function refreshImageThumbnails(){
     if(!imageMode||!pdfBytes||!adobeAPIs)return;
     const request=++imageRequest,generation=documentGeneration;
-    clearPreview();imageList.replaceChildren();imageStatus.textContent='현재 페이지 이미지 준비 중…';
+    clearPreview();imageList.replaceChildren();resetDownloads();imageStatus.textContent='현재 페이지 이미지 준비 중…';
     try{
       const pageNumber=Number(await adobeAPIs.getCurrentPage());
       if(!currentRequest(request,generation))return;
@@ -584,6 +660,6 @@ console.info('[5golgyeo_word_pdf] build 20260912-pdf-restore-1');
   $pdf('clearPdfBtn').addEventListener('click',closePdf);
   imagesBtn.addEventListener('click',()=>setImageTrayOpen(imageTray.hidden));
   $pdf('pdfImagesClose').addEventListener('click',()=>setImageTrayOpen(false));
-  window.__5golgyeoPdf={openPdfFile,closePdf,ensureOfficialViewer};
+  window.__5golgyeoPdf={openPdfFile,closePdf,ensureOfficialViewer,reconstructSelection};
   restoreRecentPdf();
 })();

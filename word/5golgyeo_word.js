@@ -885,7 +885,7 @@ let reviewPanelMessage='';
 // App integration only. Kiwi's upstream spacing algorithm runs in a lazy worker.
 let kiwiWorker=null,kiwiCall=null,kiwiSerial=0,kiwiSelectionVersion=0;
 let kiwiBusy=false,kiwiResult=null,kiwiMessage='';
-const kiwiWorkerUrl=new URL('vendor/kiwi/5golgyeo_word_kiwi_worker.js?v=20260913-hash-fix',import.meta.url);
+const kiwiWorkerUrl=new URL('vendor/kiwi/5golgyeo_word_kiwi_worker.js?v=20260913-user-dict',import.meta.url);
 function resetKiwiSelection(){
   kiwiSelectionVersion++;kiwiResult=null;
   kiwiMessage=kiwiBusy?'이전 선택 영역의 처리를 마치는 중…':'';
@@ -932,40 +932,26 @@ function requestKiwi(text){
     kiwiWorker.postMessage({id,type:'space',text});
   });
 }
-// The Kiwi worker deliberately never touches an explicit line boundary (so a
-// real paragraph break in the selection always survives). But when a PDF uses
-// justified/균등분할 spacing, an unusually wide word-gap can come back from
-// Adobe's copy/selection as if it were a line break in the first place (the
-// same "extreme gap becomes its own line" behavior is reproducible with plain
-// MuPDF text extraction on the same kind of PDF) - and once that happens, the
-// worker's per-line restoration has no way to ever re-join it, because it
-// never looks across a line boundary. Reuse the same tail/head join probe as
-// the document-mode softBreak handling (reviewLineBreakJoin, defined below)
-// to decide, per boundary, whether such a break should become a space, no
-// separator at all, or stay untouched - never touching a real blank-line
-// paragraph gap, and only ever changing whitespace (never other characters).
-async function bridgeFalseLineBreaks(text){
-  const parts=text.split(/(\r\n|\r|\n)/u);
-  for(let i=1;i<parts.length-1;i+=2){
-    const sep=await reviewLineBreakJoin(parts[i-1],parts[i+1]);
-    if(sep!=null)parts[i]=sep;
-  }
-  return parts.join('');
-}
 // Local engines return data; rendering and explicit application are separate.
 // Future spelling engine can be added here without changing the Kiwi worker.
 const localReviewEngines={kiwi:async text=>{
   const result=await requestKiwi(text);
   if(nonWhitespace(text)!==nonWhitespace(result.text))throw new Error('원문의 글자 변경이 감지되어 결과를 적용하지 않았습니다.');
   if(JSON.stringify(text.match(/\r\n|\r|\n/g)||[])!==JSON.stringify(result.text.match(/\r\n|\r|\n/g)||[]))throw new Error('줄 경계 변경이 감지되었습니다.');
-  const bridged=await bridgeFalseLineBreaks(result.text);
-  if(nonWhitespace(bridged)!==nonWhitespace(result.text))throw new Error('경계 병합 중 글자 변경이 감지되어 결과를 적용하지 않았습니다.');
-  return {engine:'kiwi',original:text,text:bridged};
+  return {engine:'kiwi',original:text,text:result.text};
 }};
 function presentLocalReview(result,selection){
   kiwiResult={...result,selection,applied:false};
-  kiwiMessage='';
+  kiwiMessage=result.layout?(result.layout.status==='aligned'?'PDF 배치를 참고했습니다. 원문과 문단을 비교한 뒤 적용해 주세요.':'PDF 배치가 불확실하여 기존 경계를 유지했습니다.') : '';
   updateKiwiUi();
+}
+async function reviewPdfSelection(selection){
+  const raw=selection.text;
+  const layout=await window.__5golgyeoPdf?.reconstructSelection(raw,selection.pdfContext,reviewLineBreakJoin)||{text:raw,status:'layout-unavailable',boundaries:[],hints:[]};
+  const result=await localReviewEngines.kiwi(layout.text);
+  if(nonWhitespace(raw)!==nonWhitespace(result.text))throw Error('PDF 문단 복원 중 원문 문자 변경을 감지했습니다.');
+  // Kept with the current result only; no document content is logged or persisted.
+  return {...result,original:raw,layout,trace:{adobeRaw:raw,kiwiInput:layout.text,kiwiOutput:result.text}};
 }
 async function runLocalReview(){
   if(kiwiBusy)return toast('현재 검수가 끝난 뒤 다시 실행해 주세요.');
@@ -973,7 +959,7 @@ async function runLocalReview(){
   if(!selection?.text.trim())return toast('검수할 텍스트를 먼저 선택해 주세요. PDF는 검수 패널의 PDF 모드에서 선택해 주세요.');
   kiwiBusy=true;kiwiResult=null;kiwiMessage='한국어 텍스트 복원기를 준비하는 중…';updateKiwiUi();
   try{
-    const result=selection.blocks?await reviewKiwiBlocks(selection.blocks):await localReviewEngines.kiwi(selection.text);
+    const result=selection.blocks?await reviewKiwiBlocks(selection.blocks):await reviewPdfSelection(selection);
     if(version!==kiwiSelectionVersion||selection!==pendingReviewSelection||selection.docId!==activeDocId)return;
     presentLocalReview(result,selection);
   }catch(error){if(version===kiwiSelectionVersion)kiwiMessage=`로컬 복원 오류: ${error.message}`;}
@@ -1201,10 +1187,12 @@ function startReviewFromSelection(){
 /* Adobe PDF 모듈(5golgyeo_word_pdf.js)이 선택된 텍스트를
    모을 때마다 이 콜백을 호출한다. PDF에서 가져온 텍스트는 문서 안의 특정 위치를
    대체하는 게 아니므로 스냅샷 없이 넘긴다. */
-window.__5golgyeoPdfLineSelectionChanged=text=>{
+window.__5golgyeoPdfLineSelectionChanged=(text,pdfContext)=>{
   if(!reviewModeActive||reviewSourceMode!=='pdf')return;
   if(!text||!text.trim())return;
+  if(pendingReviewSelection?.pdfContext?.request!==pdfContext?.request)resetReviewSelection({keepStatus:true});
   captureReviewSelection(text,null);
+  if(pendingReviewSelection)pendingReviewSelection.pdfContext=pdfContext;
 };
 // Only these are real CKEditor formatting commands. Copying every
 // schema-permitted $text attribute would also drag along legacy

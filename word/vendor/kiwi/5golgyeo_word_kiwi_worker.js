@@ -39,7 +39,14 @@ async function initialize(id){
     modelFiles[file.name]=bytes;completed++;
     self.postMessage({id,type:'status',message:`한국어 텍스트 복원기를 준비하는 중… 모델 ${completed}/${manifest.length}`});
   }));
-  const kiwi=await builder.build({modelFiles,modelType:'cong',loadTypoDict:false});
+  // TRPG-specific vocabulary Kiwi's shipped dictionary doesn't know (e.g. it
+  // otherwise always splits "핸드아웃"/"암전" mid-word) goes in this plain
+  // user dictionary instead of touching the upstream engine or model files.
+  try{
+    const dictResponse=await fetch(new URL('./user_dict.txt',import.meta.url));
+    if(dictResponse.ok)modelFiles['user.dict']=new Uint8Array(await dictResponse.arrayBuffer());
+  }catch{}
+  const kiwi=await builder.build({modelFiles,modelType:'cong',loadTypoDict:false,userDicts:modelFiles['user.dict']?['user.dict']:undefined});
   return {kiwi,version:builder.version(),initMs:performance.now()-start};
 }
 // A literal '#' (item/handout numbering like "#1", "#7:") makes the upstream

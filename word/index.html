@@ -4,7 +4,7 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>5golgyeo_word</title>
 <link rel="stylesheet" href="./vendor/ckeditor5/ckeditor5.css?v=48.4.0">
-  <link rel="stylesheet" href="./5golgyeo_word.css?v=20260913-review-panel-fix">
+  <link rel="stylesheet" href="./5golgyeo_word.css?v=20260913-layout-download">
 </head>
 <body>
 <div id="app">
@@ -78,6 +78,7 @@
     <strong>이 페이지에서 발견된 이미지</strong>
     <div class="pdf-image-tray-head"><span id="pdfImageStatus" role="status">PDF를 먼저 열어 주세요.</span><button  id="pdfImagesClose" type="button" data-icon="x" aria-label="이미지 목록 닫기" class="icon-button"></button></div>
     <div class="note">클릭하면 본문 커서 위치에 삽입됩니다. 본문으로 끌어올 수도 있습니다.</div>
+    <div class="pdf-image-download-actions"><button id="pdfSelectAllImages" type="button">전체 선택</button><button id="pdfDeselectImages" type="button">선택 해제</button><span id="pdfImageSelectionCount">0개 선택</span><button id="pdfDownloadSelected" type="button" disabled>선택 다운로드</button></div>
     <div id="pdfImageThumbnails" class="pdf-image-thumbnails"></div>
     <div class="pdf-image-preview-scroll"><div id="pdfImagePreview" aria-label="이미지 영역 선택용 페이지 미리보기"></div></div>
     <button id="pdfCropStart" type="button">미리보기에서 직접 영역 선택</button>
@@ -274,8 +275,9 @@
   <button id="deleteTabAction" class="danger">탭 삭제</button>
 </div>
 
-  <script type="module" src="./5golgyeo_word.js?v=20260913-hash-fix"></script>
-  <script src="./5golgyeo_word_pdf.js?v=20260912-kiwi-1"></script>
+  <script type="module" src="./5golgyeo_word.js?v=20260913-layout-download"></script>
+  <script src="./5golgyeo_pdf_layout.js?v=20260913-layout"></script>
+  <script src="./5golgyeo_word_pdf.js?v=20260913-layout-download"></script>
 <dialog id="pageSettingsDialog"><form id="pageSettingsForm"><h2>페이지 설정</h2>
 <label>표시 방식<select id="page-mode"><option value="pages">페이지 (Pages)</option><option value="pageless">페이지 없음 (Pageless)</option></select></label>
 <label>용지<select id="page-size"><option>A4</option><option>A3</option><option>Letter</option><option value="Custom">사용자 지정</option></select></label>

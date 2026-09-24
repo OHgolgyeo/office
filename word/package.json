@@ -1,0 +1,28 @@
+{
+  "name": "ogolgye-word",
+  "productName": "오골계 워드",
+  "version": "0.1.4",
+  "description": "HWP 편집기 + PDF 줄바꿈 복원 보기 (로컬 전용)",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "serve": "node server.js",
+    "build-studio": "node scripts/build-studio.js",
+    "get-model": "node scripts/get-kiwi-model.js"
+  },
+  "dependencies": {
+    "@hyzyla/pdfium": "^2.1.13",
+    "@rhwp/core": "0.8.6",
+    "@rhwp/editor": "0.8.6",
+    "jpeg-js": "^0.4.4",
+    "kiwi-nlp": "^0.24.0",
+    "opentype.js": "^2.0.0",
+    "pngjs": "^7.0.0",
+    "tar": "^7.5.22",
+    "tesseract.js": "^6.0.1"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0"
+  }
+}

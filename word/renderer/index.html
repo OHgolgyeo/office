@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>오골계 워드</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+
+<main id="work">
+  <section id="main-pane" class="pane">
+    <div id="main-editor" class="pane-body"></div>
+  </section>
+  <div id="splitter" hidden></div>
+  <section id="sub-pane" class="pane" hidden>
+    <div class="pane-head">
+      <span id="sub-kind" class="kind"></span><span id="sub-name"></span><span id="sub-dirty" class="dirty" hidden>●</span>
+      <span class="spacer"></span>
+      <span id="status" class="status"></span>
+      <button id="sub-close" title="서브뷰 닫기">✕</button>
+    </div>
+    <div id="sub-body" class="pane-body">
+      <div id="sub-drop" class="drop">PDF 또는 HWP/HWPX 파일을 여기에 끌어다 놓거나<br>위쪽 서브뷰 메뉴에서 여세요.</div>
+    </div>
+  </section>
+  <div id="drag-shield" hidden></div>
+</main>
+<input type="file" id="picker" hidden>
+<script type="module" src="app.js"></script>
+</body>
+</html>

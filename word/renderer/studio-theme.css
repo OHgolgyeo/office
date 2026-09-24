@@ -1,0 +1,44 @@
+/* 오골계 워드 — 플랫 화이트 테마. 테마색(--og-accent) 하나로 강조색 전체가 정해진다.
+   편집 화면(rhwp-studio)은 --ui-*, --color-* 변수로 색을 정하므로 그 값만 덮어쓴다(rhwp 새 버전에도 그대로 적용). */
+:root {
+  --og-accent: #6b7b3a;                                              /* 기본: 올리브그린 */
+  --og-accent-soft: color-mix(in srgb, var(--og-accent) 12%, #fff);  /* 옅은 강조(선택·마우스 올림) */
+  --og-accent-faint: color-mix(in srgb, var(--og-accent) 6%, #fff);
+  --og-accent-line: color-mix(in srgb, var(--og-accent) 45%, #fff);
+  --og-line: #e6e7e3;                                               /* 얇은 선 */
+  --og-line-strong: #d4d6d0;
+  --og-text: #2f312c;
+
+  /* 바탕·표면: 모두 흰색 */
+  --ui-bg: #fff; --ui-bg-light: #fff; --ui-surface: #fff; --ui-surface-raised: #fff; --ui-surface-muted: #f6f7f4;
+  --color-bg: #fff; --color-bg-light: #fff; --color-surface: #fff; --color-surface-raised: #fff;
+  --ui-toolbar-bg-start: #fff; --ui-toolbar-bg-end: #fff;
+  /* 선 */
+  --ui-border: var(--og-line); --ui-border-light: var(--og-line); --ui-border-subtle: var(--og-line); --ui-border-strong: var(--og-line-strong);
+  --color-border: var(--og-line); --color-border-light: var(--og-line); --color-border-lighter: var(--og-line); --color-border-dark: var(--og-line-strong);
+  --color-border-input: var(--og-line-strong);
+  /* 글자 */
+  --ui-text: var(--og-text); --color-text: var(--og-text);
+  /* 강조: 테마색 */
+  --ui-menu-open: var(--og-accent); --ui-menu-open-border: var(--og-accent); --ui-text-on-accent: #fff;
+  --ui-hover: var(--og-accent-faint); --ui-hover-strong: var(--og-accent-soft); --ui-active: var(--og-accent-soft);
+  --ui-selected: var(--og-accent-soft); --ui-accent-bg: var(--og-accent-soft); --ui-accent-bg-light: var(--og-accent-faint);
+  --ui-focus-soft: var(--og-accent-soft); --ui-link: var(--og-accent);
+  --color-primary: var(--og-accent); --color-primary-dark: color-mix(in srgb, var(--og-accent) 80%, #000);
+  --color-primary-hover: color-mix(in srgb, var(--og-accent) 88%, #000); --color-primary-light: var(--og-accent-soft);
+  --color-primary-subtle: var(--og-accent-faint); --color-focus-border: var(--og-accent);
+  --color-hover-bg: var(--og-accent-faint); --color-active-bg: var(--og-accent-soft); --color-selected-bg: var(--og-accent-soft);
+  --color-accent-bg: var(--og-accent-soft); --color-accent-bg-light: var(--og-accent-faint);
+}
+/* 플랫: 도구 막대 그라데이션·그림자 없애기 */
+#menu-bar, #icon-toolbar, #style-bar, #status-bar { background: #fff !important; background-image: none !important; box-shadow: none !important; }
+#menu-bar { border-bottom: 1px solid var(--og-line) !important; }
+.menu-dropdown, .md-sub-panel { box-shadow: 0 2px 8px rgba(0,0,0,.08) !important; border-color: var(--og-line) !important; border-radius: 6px; }
+.menu-item.open > .menu-title { border-radius: 4px 4px 0 0; }
+#style-bar select, #style-bar input { border-color: var(--og-line-strong) !important; box-shadow: none !important; }
+/* 테마색 고르기(보기 메뉴 안) */
+.og-swatches { display: grid; grid-template-columns: repeat(5, 22px); gap: 6px; padding: 6px 12px 8px 36px; }
+.og-swatch { width: 22px; height: 22px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px var(--og-line-strong); cursor: pointer; padding: 0; }
+.og-swatch.on { box-shadow: 0 0 0 2px var(--og-accent); }
+.og-custom { display: flex; align-items: center; gap: 6px; padding: 0 12px 8px 36px; font-size: 12px; color: #666; }
+.og-custom input { width: 28px; height: 22px; border: 0; padding: 0; background: none; cursor: pointer; }

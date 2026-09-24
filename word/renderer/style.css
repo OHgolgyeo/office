@@ -1,0 +1,30 @@
+[hidden]{display:none!important}
+:root{--og-accent:#6b7b3a;--line:#e6e7e3;--bg:#fff;--accent:var(--og-accent);--soft:color-mix(in srgb,var(--og-accent) 12%,#fff)}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;font-family:"Malgun Gothic","Noto Sans KR",system-ui,sans-serif;font-size:13px;background:var(--bg);color:#222}
+body{display:flex;flex-direction:column}
+.bar{display:flex;align-items:center;gap:14px;padding:6px 10px;background:var(--bar);color:#eee;flex:none}
+.logo{font-weight:700;letter-spacing:.5px}
+.group{display:flex;align-items:center;gap:6px}
+.bar button,.bar select{background:#3c3f45;color:#fff;border:1px solid #555;border-radius:6px;padding:4px 10px;font:inherit;cursor:pointer}
+.bar button:hover{background:#4a4e55}
+.status{color:#888;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-right:6px}
+#work{flex:1;display:flex;min-height:0;position:relative}
+#work.sub-left{flex-direction:row-reverse}
+.pane{display:flex;flex-direction:column;min-width:240px;background:#fff}
+#main-pane{flex:1 1 0}
+#sub-pane{flex:0 0 45%}
+.pane-head{display:flex;align-items:center;gap:6px;padding:5px 10px;border-bottom:1px solid var(--line);background:#fff;font-size:12px;flex:none;color:#444}
+.pane-head button{border:1px solid var(--line);background:#fff;border-radius:5px;padding:1px 8px;font:inherit;cursor:pointer;color:#555}
+.pane-head button:hover{background:var(--soft);border-color:var(--accent)}
+.spacer{flex:1}
+.kind{background:var(--soft);color:var(--accent);border-radius:4px;padding:0 6px;font-size:11px;font-weight:600}
+.dirty{color:var(--accent)}
+.pane-body{flex:1;min-height:0;position:relative}
+.pane-body iframe{width:100%;height:100%;border:0;display:block}
+#splitter{flex:none;width:5px;cursor:col-resize;background:var(--line)}
+#splitter:hover,#splitter.on{background:var(--accent)}
+#drag-shield{position:absolute;inset:0;cursor:col-resize;z-index:50}
+.drop{position:absolute;inset:16px;border:2px dashed var(--line);border-radius:10px;display:flex;align-items:center;justify-content:center;text-align:center;color:#888;line-height:1.7}
+.drop.over{border-color:var(--accent);color:var(--accent);background:var(--soft)}
+.busy{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.85);font-size:14px;color:#444;z-index:5}

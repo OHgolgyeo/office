@@ -1,0 +1,199 @@
+/* 오골계 워드 — 플랫 화이트 테마. 테마색(--og-accent) 하나로 강조색 전체가 정해진다.
+   편집 화면(rhwp-studio)은 --ui-*, --color-* 변수로 색을 정하므로 그 값만 덮어쓴다(rhwp 새 버전에도 그대로 적용). */
+:root {
+  --og-accent: #6b7b3a;                                              /* 기본: 올리브그린 */
+  --og-accent-soft: color-mix(in srgb, var(--og-accent) 12%, #fff);  /* 옅은 강조(선택·마우스 올림) */
+  --og-accent-faint: color-mix(in srgb, var(--og-accent) 6%, #fff);
+  --og-accent-line: color-mix(in srgb, var(--og-accent) 45%, #fff);
+  --og-line: #e6e7e3;                                               /* 얇은 선 */
+  --og-line-strong: #d4d6d0;
+  --og-text: #2f312c;
+
+  /* 바탕·표면: 모두 흰색 */
+  --ui-bg: #fff; --ui-bg-light: #fff; --ui-surface: #fff; --ui-surface-raised: #fff; --ui-surface-muted: #f6f7f4;
+  --color-bg: #fff; --color-bg-light: #fff; --color-surface: #fff; --color-surface-raised: #fff;
+  --ui-toolbar-bg-start: #fff; --ui-toolbar-bg-end: #fff;
+  /* 선 */
+  --ui-border: var(--og-line); --ui-border-light: var(--og-line); --ui-border-subtle: var(--og-line); --ui-border-strong: var(--og-line-strong);
+  --color-border: var(--og-line); --color-border-light: var(--og-line); --color-border-lighter: var(--og-line); --color-border-dark: var(--og-line-strong);
+  --color-border-input: var(--og-line-strong);
+  /* 글자 */
+  --ui-text: var(--og-text); --color-text: var(--og-text);
+  /* 강조: 테마색 */
+  --ui-menu-open: var(--og-accent); --ui-menu-open-border: var(--og-accent); --ui-text-on-accent: #fff;
+  --accent-hover: var(--og-accent-line);                            /* 메뉴 제목 마우스 올림 테두리(편집 화면 기본은 파란 계열) */
+  --ui-hover: var(--og-accent-faint); --ui-hover-strong: var(--og-accent-soft); --ui-active: var(--og-accent-soft);
+  --ui-selected: var(--og-accent-soft); --ui-accent-bg: var(--og-accent-soft); --ui-accent-bg-light: var(--og-accent-faint);
+  --ui-focus-soft: var(--og-accent-soft); --ui-link: var(--og-accent);
+  --color-primary: var(--og-accent); --color-primary-dark: color-mix(in srgb, var(--og-accent) 80%, #000);
+  --color-primary-hover: color-mix(in srgb, var(--og-accent) 88%, #000); --color-primary-light: var(--og-accent-soft);
+  --color-primary-subtle: var(--og-accent-faint); --color-focus-border: var(--og-accent);
+  --color-hover-bg: var(--og-accent-faint); --color-active-bg: var(--og-accent-soft); --color-selected-bg: var(--og-accent-soft);
+  --color-accent-bg: var(--og-accent-soft); --color-accent-bg-light: var(--og-accent-faint);
+}
+/* 플랫: 도구 막대 그라데이션·그림자 없애기 */
+#menu-bar, #icon-toolbar, #style-bar, #status-bar { background: #fff !important; background-image: none !important; box-shadow: none !important; }
+#menu-bar { border-bottom: 1px solid var(--og-line) !important; }
+.menu-dropdown, .md-sub-panel { box-shadow: 0 2px 8px rgba(0,0,0,.08) !important; border-color: var(--og-line) !important; border-radius: 6px; }
+.menu-item.open > .menu-title { border-radius: 4px 4px 0 0; }
+/* 앱을 막 켰을 때 마지막 마우스 위치의 메뉴 제목에 마우스 올림 표시가 남는 것을 막는다. 실제로 마우스를 움직이면 정상 표시. */
+:root:not(.og-pointer-live) .menu-item:not(.open) > .menu-title:hover { background: transparent; border-color: transparent; color: var(--color-text); }
+#style-bar select, #style-bar input { border-color: var(--og-line-strong) !important; box-shadow: none !important; }
+/* 환경 설정의 눈금자 표시를 끄면 눈금자 자리까지 문서 영역으로 돌려준다. */
+:root.og-noruler #editor-area { grid-template-rows: minmax(0, 1fr) !important; grid-template-columns: minmax(0, 1fr) !important; }
+:root.og-noruler #ruler-corner,
+:root.og-noruler #h-ruler,
+:root.og-noruler #v-ruler { display: none !important; }
+:root.og-noruler #scroll-container { grid-row: 1 !important; grid-column: 1 !important; }
+/* 페이지 없음: 종이의 경계나 회색 바탕은 없애고, 흰 화면 안의 가운데 본문 폭만 편집 영역으로 쓴다. */
+:root.og-pageless { --doc-workspace: #fff; --doc-paper: #fff; }
+:root.og-pageless #scroll-container,
+:root.og-pageless #scroll-content { background: #fff !important; }
+:root.og-pageless #scroll-content canvas.document-page-canvas,
+:root.og-pageless #scroll-content .page-placeholder { box-shadow: none !important; outline: 0 !important; }
+/* 테마색 고르기(보기 메뉴 안) */
+.og-swatches { display: grid; grid-template-columns: repeat(5, 22px); gap: 6px; padding: 6px 12px 8px 36px; }
+.og-swatch { width: 22px; height: 22px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px var(--og-line-strong); cursor: pointer; padding: 0; }
+.og-swatch.on { box-shadow: 0 0 0 2px var(--og-accent); }
+.og-custom { display: flex; align-items: center; gap: 6px; padding: 0 12px 8px 36px; font-size: 12px; color: #666; }
+.og-custom input { width: 28px; height: 22px; border: 0; padding: 0; background: none; cursor: pointer; }
+
+/* Google 문서식 스타일 목록 */
+.og-style { position: relative; display: inline-block; margin-right: 4px; }
+.og-style-btn { min-width: 118px; height: 26px; display: inline-flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 8px; border: 1px solid #d8d8d8; border-radius: 4px; background: #fff; font-size: 12px; color: #333; cursor: pointer; }
+.og-style-btn:hover { border-color: var(--og-accent); }
+.og-style-arrow { color: #888; font-size: 10px; }
+.og-style-menu { position: absolute; top: 30px; left: 0; z-index: 1002; min-width: 230px; max-height: 70vh; overflow: auto; background: #fff; border: 1px solid #ddd; border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.14); padding: 4px 0; }
+.og-style-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 14px; cursor: pointer; white-space: nowrap; font-size: 12px; }
+.og-style-item:hover { background: #f4f5f0; }
+.og-style-item.on { background: color-mix(in srgb, var(--og-accent) 14%, #fff); }
+.og-style-item kbd { font: 10px sans-serif; color: #999; }
+.og-style-more summary { padding: 6px 14px; color: #777; cursor: pointer; font-size: 12px; border-top: 1px solid #eee; }
+/* 도구 막대는 칸 폭이 정해진 격자라, 스타일 단추도 다른 선택 상자처럼 칸 폭에 맞춘다(긴 이름은 말줄임) */
+.sb-field-grid .og-style { width: 100%; min-width: 0; margin-right: 0; }
+.sb-field-grid .og-style-btn { width: 100%; min-width: 0; box-sizing: border-box; padding: 0 4px 0 6px; gap: 2px; font-size: 11.5px; }
+.og-style-cur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* 페이지 목록: 서식 도구 줄 맨 왼쪽, 스타일 목록 바로 앞 */
+.og-page-list { position: relative; min-width: 0; }
+.og-page-list-btn { width: 100%; min-width: 0; height: 26px; display: inline-flex; align-items: center; justify-content: space-between; gap: 3px; padding: 0 6px; border: 1px solid #d8d8d8; border-radius: 4px; background: #fff; color: #333; font-size: 11.5px; cursor: pointer; white-space: nowrap; }
+.og-page-list-btn:hover, .og-page-list.open > .og-page-list-btn { border-color: var(--og-accent); background: color-mix(in srgb, var(--og-accent) 8%, #fff); }
+.og-page-list-arrow { color: #888; font-size: 10px; }
+.og-page-list:not(.open) > .og-tabs { display: none; }
+.og-page-list.open > .og-tabs { display: flex; }
+.og-tabs { position: absolute; top: 30px; left: 0; width: 260px; max-height: min(540px, calc(100vh - 150px)); z-index: 1002; background: #fff; border: 1px solid #ddd; border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.14); flex-direction: column; font-size: 13px; color: #333; box-sizing: border-box; overflow: visible; padding: 0; }
+.og-tabs-head { display: flex; align-items: center; gap: 4px; padding: 8px 8px 6px 14px; font-weight: 600; user-select: none; border-bottom: 1px solid #eee; }
+.og-tabs-head span { flex: 1; }
+.og-tabs-head button, .og-tab-more { border: 0; background: none; cursor: pointer; color: #666; border-radius: 4px; padding: 2px 6px; font-size: 14px; }
+.og-tabs-head button:hover, .og-tab-more:hover { background: #f0f0f0; }
+.og-tabs-list { flex: 1; min-height: 0; overflow: auto; padding: 6px 8px 10px; }
+.og-tab { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 16px; cursor: pointer; }
+.og-tab:hover { background: #f4f5f1; }
+.og-tab.on { background: color-mix(in srgb, var(--og-accent) 16%, #fff); font-weight: 600; }
+.og-tab-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.og-tab-ic { color: #888; font-size: 12px; }
+.og-tab-more { visibility: hidden; font-size: 13px; }
+.og-tab:hover .og-tab-more, .og-tab.on .og-tab-more { visibility: visible; }
+.og-tab-edit { flex: 1; min-width: 0; font: inherit; padding: 2px 4px; border: 1px solid var(--og-accent); border-radius: 4px; }
+.og-ols { margin: 2px 0 6px 18px; border-left: 2px solid #eee; }
+.og-ol { padding: 4px 8px; cursor: pointer; color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.og-ol:hover { color: #000; background: #f6f6f6; }
+.og-tab-menu { position: absolute; right: 10px; z-index: 40; background: #fff; border: 1px solid #ddd; border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,.12); padding: 4px 0; min-width: 120px; }
+.og-tab-menu div { padding: 7px 14px; cursor: pointer; }
+.og-tab-menu div:hover { background: #f4f5f0; }
+.og-tab-menu div.disabled { color: #bbb; cursor: default; background: none; }
+
+/* 페이지 목록 칸 하나가 늘어난 만큼 서식 필드 격자를 확장한다. */
+/* 편집기 기본 CSS는 이 묶음을 481px(5칸)로 고정하므로, 6칸이 된 만큼 폭을 내용에 맞춰 풀어 줘야 옆의 굵게 단추와 겹치지 않는다. */
+.sb-field-grid:has(.og-page-list) { grid-template-columns: 82px minmax(68px,88px) minmax(54px,64px) 136px minmax(72px,86px) minmax(72px,86px); width: max-content; max-width: none; }
+.sb-field-ribbon-group:has(.og-page-list) { flex: 0 0 auto; width: max-content; min-width: max-content; max-width: none; }
+@media (width <= 560px) {
+  .sb-field-grid:has(.og-page-list) { grid-template-columns: 74px minmax(54px,1fr) minmax(40px,.75fr) 120px minmax(54px,.95fr) minmax(54px,.95fr); }
+}
+
+/* 사용자가 등록한 AI 글쓰기 도구 */
+.og-ai-tools { display:flex; align-self:stretch; align-items:center; flex:0 0 auto; }
+.og-ai-tool-btn { min-width:48px !important; height:100%; flex-direction:column; gap:0 !important; padding:2px 5px !important; border-top:2px solid var(--ai-color) !important; }
+.og-ai-tool-icon { color:var(--ai-color); font-size:15px; font-weight:700; line-height:17px; max-width:40px; overflow:hidden; }
+.og-ai-tool-label { color:#555; font-size:10px; max-width:64px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.og-ai-panel { position:fixed; z-index:1250; display:flex; flex-direction:column; box-sizing:border-box; width:min(430px,calc(100vw - 20px)); max-height:calc(100vh - 108px); color:#333; background:#fff; border:1px solid #d5d5d5; border-radius:9px; box-shadow:0 10px 30px rgba(0,0,0,.2); overflow:hidden; font:13px/1.45 "맑은 고딕",sans-serif; }
+.og-ai-panel[hidden] { display:none; }
+.og-ai-panel.float { top:112px; right:18px; }
+.og-ai-panel.side { top:96px; bottom:8px; max-height:none; width:min(390px,calc(100vw - 20px)); border-radius:7px; }
+.og-ai-panel.side.left { left:8px; right:auto; }.og-ai-panel.side.right { right:8px; left:auto; }
+.og-ai-head { display:flex; align-items:center; gap:8px; padding:10px 10px 9px 13px; border-bottom:3px solid var(--ai-color); cursor:default; }
+.og-ai-panel.float .og-ai-head { cursor:move; }
+.og-ai-head b { flex:1; }.og-ai-close { border:0;background:none;font-size:20px;color:#777;cursor:pointer; }
+.og-ai-body { display:flex; flex-direction:column; min-height:0; padding:10px; gap:7px; }
+.og-ai-input,.og-ai-output { box-sizing:border-box; width:100%; resize:vertical; border:1px solid #d7d7d7; border-radius:5px; padding:8px; color:#222; background:#fff; font:13px/1.5 "맑은 고딕",sans-serif; }
+.og-ai-input { min-height:88px; max-height:220px; }.og-ai-output { min-height:130px; flex:1; resize:none; }
+.og-ai-actions { display:flex; flex-wrap:wrap; gap:6px; }.og-ai-actions button { border:1px solid #ccd2c2;border-radius:5px;background:#fff;padding:6px 9px;cursor:pointer; }
+.og-ai-actions button.primary { color:#fff;background:var(--ai-color);border-color:var(--ai-color); }.og-ai-status { min-height:18px;color:#666;font-size:11px; }
+.og-ai-config-grid { display:grid;grid-template-columns:110px minmax(190px,1fr);gap:8px 10px;align-items:center; }.og-ai-config-grid textarea { min-height:88px;resize:vertical; }
+.og-ai-config-list { display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 12px; }.og-ai-config-list button { border:1px solid #d5d5d5;border-radius:5px;background:#fff;padding:5px 8px;cursor:pointer; }.og-ai-config-list button.active { border-color:var(--og-accent);background:color-mix(in srgb,var(--og-accent) 10%,#fff); }
+
+:root[data-theme-effective="dark"] .og-ai-panel { color:var(--ui-text);background:var(--ui-surface);border-color:var(--ui-border); }
+:root[data-theme-effective="dark"] .og-ai-input,:root[data-theme-effective="dark"] .og-ai-output { color:var(--ui-text);background:var(--ui-surface-raised);border-color:var(--ui-border); }
+
+/* 환경 설정 → Google 드라이브 연결: 따라 하기 설명 */
+.dialog-wrap:has(> .opt-body) { display: flex; flex-direction: column; max-height: calc(100dvh - 32px); overflow: hidden; }
+.dialog-wrap:has(> .opt-body) > .dialog-title,
+.dialog-wrap:has(> .opt-body) > .dialog-footer { flex: none; }
+.dialog-wrap > .opt-body { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; overflow: hidden; }
+.opt-body > .dialog-tabs { flex: none; }
+.opt-body > .opt-tab-panel.active { flex: 1 1 auto; min-height: 0; padding-right: 8px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.og-g-guide { line-height: 1.6; }
+.og-g-guide > summary { cursor: pointer; font-weight: 600; color: var(--og-text); }
+.og-g-guide > p { margin: .5em 0; }
+.og-g-guide ol { margin: .4em 0 0 1.4em; padding: 0; }
+.og-g-guide ol > li { margin-bottom: .55em; }
+.og-g-guide ul { margin: .25em 0 0 1.1em; padding: 0; list-style: disc; }
+.og-ext-link { color: var(--og-accent); text-decoration: underline; text-underline-offset: 2px; }
+.og-ext-link::after { content: " ↗"; font-size: .85em; }
+.og-ext-link:hover { color: color-mix(in srgb, var(--og-accent) 75%, #000); }
+.og-g-guide ul.og-g-steps { list-style: none; margin-left: 0; }
+.og-g-guide ul.og-g-steps > li { margin: .45em 0; padding: 6px 9px; border-left: 3px solid var(--og-accent-line); background: var(--og-accent-faint); border-radius: 0 5px 5px 0; }
+.og-g-guide ul.og-g-steps ul { margin-top: .2em; }
+.og-g-tip { margin-top: .3em; font-size: .95em; color: #666; }
+.og-g-guide code { padding: 0 4px; border-radius: 3px; background: #f0f1ed; font-family: inherit; overflow-wrap: anywhere; word-break: break-word; }
+/* 제품 정보(오골계 워드 라이선스 + 사용한 오픈소스) */
+.og-about-back { position: fixed; inset: 0; z-index: 10000; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(20, 22, 18, .28); }
+.og-about { display: flex; flex-direction: column; width: min(680px, 100%); max-height: calc(100dvh - 32px); background: #fff; border-radius: 12px; box-shadow: 0 12px 36px rgba(0, 0, 0, .22); color: #262824; font-size: 13px; overflow: hidden; }
+.og-about-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #e6e7e3; }
+.og-about-title { flex: 1; font-weight: 700; font-size: 14px; }
+.og-about-head button { height: 28px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: #555; font: inherit; cursor: pointer; }
+.og-about-head button:hover { background: var(--og-accent-soft); color: #000; }
+.og-about-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 16px 18px; overscroll-behavior: contain; }
+.og-about-foot { display: flex; justify-content: space-between; padding: 10px 14px; border-top: 1px solid #e6e7e3; }
+.og-about-close { height: 30px; padding: 0 16px; border: 0; border-radius: 7px; background: var(--og-accent); color: #fff; font: inherit; cursor: pointer; }
+.og-about-close:hover { filter: brightness(1.08); }
+.og-about-prev { height: 30px; padding: 0 16px; border: 1px solid #d4d6d0; border-radius: 7px; background: #fff; color: #333; font: inherit; cursor: pointer; }
+.og-about-prev:hover { border-color: var(--og-accent); background: var(--og-accent-soft); }
+.og-about-back[hidden] { display: none; }
+/* rhwp 제품 정보 창에 붙인 "이전"(닫기 반대편) */
+.dialog-footer > .og-about-native-prev { margin-right: auto; }
+.og-about-wait { padding: 30px 0; text-align: center; color: #888; }
+.og-about-hero { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+.og-about-pic { width: 76px; height: 76px; flex: none; object-fit: contain; }
+.og-about-name { font-size: 18px; font-weight: 700; }
+.og-about-ver { margin-top: 2px; color: #777; }
+.og-about-by { margin-top: 4px; }
+.og-about-link { color: var(--og-accent); text-decoration: underline; text-underline-offset: 2px; }
+.og-about-link:hover { color: color-mix(in srgb, var(--og-accent) 75%, #000); }
+.og-about-note { padding: 9px 11px; border-left: 3px solid var(--og-accent-line); border-radius: 0 6px 6px 0; background: var(--og-accent-faint); line-height: 1.6; color: #444; }
+.og-about-sec-title { margin: 18px 0 6px; font-weight: 700; }
+.og-about-summary { line-height: 1.6; color: #444; }
+.og-about-row-btn { margin-top: 8px; height: 30px; padding: 0 12px; border: 1px solid #d4d6d0; border-radius: 7px; background: #fff; color: #333; font: inherit; cursor: pointer; }
+.og-about-row-btn:hover { border-color: var(--og-accent); background: var(--og-accent-soft); }
+.og-about-list { border: 1px solid #e6e7e3; border-radius: 8px; overflow: hidden; }
+.og-about-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 12px; border: 0; border-top: 1px solid #eceee9; background: #fff; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.og-about-item:first-child { border-top: 0; }
+.og-about-item:hover { background: var(--og-accent-faint); }
+.og-about-item:disabled { cursor: progress; opacity: .6; }
+.og-about-item-main { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 1px; }
+.og-about-item-use { font-size: 12px; color: #777; }
+.og-about-badge { flex: none; padding: 1px 7px; border-radius: 10px; background: #f0f1ed; color: #555; font-size: 11.5px; white-space: nowrap; }
+.og-about-arrow { color: #aaa; font-size: 16px; }
+.og-about-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-bottom: 4px; color: #666; }
+.og-about-text { margin: 0; padding: 10px 12px; max-height: none; border-radius: 7px; background: #f7f8f5; font: 12px/1.55 Consolas, "D2Coding", monospace; white-space: pre-wrap; overflow-wrap: anywhere; color: #333; }
+.og-about-frame { width: 100%; height: 60vh; border: 1px solid #e6e7e3; border-radius: 7px; background: #fff; }

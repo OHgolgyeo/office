@@ -1,0 +1,5 @@
+# 만든 설치 파일·시험 기록(저장소에 올리지 않는다)
+node_modules/
+dist/
+dist-test/
+*.log

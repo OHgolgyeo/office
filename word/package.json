@@ -1,0 +1,112 @@
+{
+  "name": "ogolgye-word",
+  "productName": "오골계 워드",
+  "version": "1.0.0",
+  "description": "HWP 편집기 + PDF 줄바꿈 복원 보기 (로컬 전용)",
+  "author": "오골계 (@5golgyeo, https://x.com/5golgyeo)",
+  "license": "SEE LICENSE IN LICENSE",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "serve": "node server.js",
+    "build-studio": "node scripts/build-studio.js",
+    "get-model": "node scripts/get-kiwi-model.js",
+    "check-exports": "node scripts/check-export-files.js",
+    "check-pdf-pipeline": "node scripts/check-pdf-pipeline.js",
+    "check-pdf-export": "electron scripts/check-pdf-export.js",
+    "dist": "electron-builder --publish never",
+    "release": "electron-builder --publish always"
+  },
+  "dependencies": {
+    "@hyzyla/pdfium": "^2.1.13",
+    "@phosphor-icons/web": "^2.1.2",
+    "@rhwp/core": "0.8.6",
+    "@rhwp/editor": "0.8.6",
+    "electron-updater": "^6.8.9",
+    "jpeg-js": "^0.4.4",
+    "kiwi-nlp": "^0.24.0",
+    "pngjs": "^7.0.0",
+    "tar": "^7.5.22",
+    "tesseract.js": "^6.0.1"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.ogolgye.word",
+    "productName": "오골계 워드",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "asar": false,
+    "files": [
+      "main.js",
+      "preload.cjs",
+      "server.js",
+      "package.json",
+      "LICENSE",
+      "core/**",
+      "renderer/**",
+      "assets/**",
+      "vendor/**",
+      "models/**",
+      "licenses/**",
+      "!**/*.log"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "Ogolgye-Word-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "shortcutName": "오골계 워드",
+      "uninstallDisplayName": "오골계 워드",
+      "deleteAppDataOnUninstall": false
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "category": "public.app-category.productivity",
+      "identity": "-",
+      "artifactName": "Ogolgye-Word-${version}-mac-${arch}.${ext}"
+    },
+    "dmg": {
+      "artifactName": "Ogolgye-Word-${version}-mac-${arch}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "OHgolgyeo",
+        "repo": "office",
+        "releaseType": "release"
+      }
+    ]
+  }
+}

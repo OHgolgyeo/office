@@ -1,0 +1,111 @@
+# 오골계 워드 릴리스: word/package.json 의 version 을 올려서 main 에 올리면
+# Windows·맥 설치 파일을 만들어 GitHub 릴리스(v<버전>)로 올린다. 설치된 앱은 이 릴리스를 보고 업데이트한다.
+# 이미 있는 버전이면 아무것도 하지 않는다. Actions 탭의 "Run workflow" 로 직접 실행할 수도 있다.
+name: 오골계 워드 릴리스
+
+on:
+  push:
+    branches: [main]
+    paths: ["word/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write            # 릴리스를 만들고 설치 파일을 올린다
+
+concurrency:
+  group: word-release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      skip: ${{ steps.ver.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 이미 올린 버전인지 확인
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(node -p "require('./word/package.json').version")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if gh release view "v$v" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v$v 릴리스가 이미 있어 건너뜁니다. 새로 배포하려면 word/package.json 의 version 을 올리세요."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: version
+    if: needs.version.outputs.skip == 'false'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+          - os: macos-latest
+            name: mac
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: word
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: word/package-lock.json
+      - name: 부품 설치
+        run: npm ci
+      - name: 설치 파일 만들기
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            word/dist/*.exe
+            word/dist/*.dmg
+            word/dist/*.zip
+            word/dist/*.blockmap
+            word/dist/latest*.yml
+
+  release:
+    needs: [version, build]
+    # 맥 빌드가 실패해도 Windows 설치 파일이 있으면 릴리스를 올린다(기존 Windows 사용자의 자동 업데이트가 멈추지 않게)
+    if: always() && needs.version.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: 릴리스 올리기
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ needs.version.outputs.version }}"
+          ls -la out
+          test -f out/latest.yml || { echo "::error::Windows 설치 파일을 만들지 못해 릴리스를 올리지 않습니다."; exit 1; }
+          gh release create "v$v" out/* --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --title "오골계 워드 $v" \
+            --notes "Windows: Ogolgye-Word-Setup-$v.exe 를 받아 설치하세요. 설치한 뒤에는 새 버전이 자동으로 설치됩니다.
+          맥: 쓰시는 맥에 맞는 .dmg(애플 칩: arm64, 인텔: x64)를 받아 설치하세요."
+      - name: 릴리스 확인(자동 업데이트에 필요한 파일)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ needs.version.outputs.version }}"
+          assets=$(gh release view "v$v" --repo "${{ github.repository }}" --json isDraft,assets --jq '(.isDraft|tostring) + " " + ([.assets[].name]|join(","))')
+          echo "$assets"
+          case "$assets" in false*latest.yml*) ;; *) echo "::error::릴리스가 초안이거나 latest.yml 이 없어 자동 업데이트가 되지 않습니다."; exit 1;; esac
+          case "$assets" in *"Ogolgye-Word-Setup-$v.exe"*) ;; *) echo "::error::Windows 설치 파일이 릴리스에 없습니다."; exit 1;; esac
+          case "$assets" in *latest-mac.yml*) ;; *) echo "::warning::맥 설치 파일이 없습니다(맥 빌드 기록을 확인하세요).";; esac

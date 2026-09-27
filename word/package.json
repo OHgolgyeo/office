@@ -14,6 +14,7 @@
     "get-model": "node scripts/get-kiwi-model.js",
     "check-exports": "node scripts/check-export-files.js",
     "check-pdf-pipeline": "node scripts/check-pdf-pipeline.js",
+    "check-api-tools": "node scripts/check-api-tools.js",
     "check-pdf-export": "electron scripts/check-pdf-export.js",
     "dist": "electron-builder --publish never",
     "release": "electron-builder --publish always"

@@ -95,13 +95,13 @@ ipcMain.handle("google:fetch", ipcCall(async ({ id }) => {
   return { kind: f.kind, name: f.name, bytes: new Uint8Array(f.bytes) };
 }));
 
-// 사용자 AI 도구: API 키와 설정은 암호화하고 요청도 메인 프로세스에서 보낸다.
+// 사용자 API 도구: API 키와 설정은 암호화하고 요청도 메인 프로세스에서 보낸다.
 let ai = null;
 const aiTools = () => (ai ||= new AiTools({ dir: app.getPath("userData"), crypt: secureCrypt("API 키") }));
 ipcMain.handle("ai:list", ipcCall(async () => ({ tools: aiTools().list() })));
 ipcMain.handle("ai:save", ipcCall(async (tool) => ({ tools: aiTools().save(tool) })));
 ipcMain.handle("ai:remove", ipcCall(async ({ id }) => ({ tools: aiTools().remove(id) })));
-ipcMain.handle("ai:run", ipcCall(async ({ id, input }) => aiTools().run(id, input)));
+ipcMain.handle("ai:run", ipcCall(async ({ id, input, options }) => aiTools().run(id, input, options)));
 // 중간 구조 → 한글 문서(HWPX)
 ipcMain.handle("convert:hwpx", async (_e, { model, pageless }) => new Uint8Array(await hwpxFromModel(model, { pageless: pageless ?? null })));
 

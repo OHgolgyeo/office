@@ -111,7 +111,7 @@
   .sb-field-grid:has(.og-page-list) { grid-template-columns: 74px minmax(54px,1fr) minmax(40px,.75fr) 120px minmax(54px,.95fr) minmax(54px,.95fr); }
 }
 
-/* 사용자가 등록한 AI 글쓰기 도구 */
+/* 사용자가 등록한 API 도구 */
 .og-ai-tools { display:flex; align-self:stretch; align-items:center; flex:0 0 auto; }
 .og-ai-tool-btn { min-width:48px !important; height:100%; flex-direction:column; gap:0 !important; padding:2px 5px !important; border-top:2px solid var(--ai-color) !important; }
 .og-ai-tool-icon { color:var(--ai-color); font-size:15px; font-weight:700; line-height:17px; max-width:40px; overflow:hidden; }
@@ -125,11 +125,20 @@
 .og-ai-panel.float .og-ai-head { cursor:move; }
 .og-ai-head b { flex:1; }.og-ai-close { border:0;background:none;font-size:20px;color:#777;cursor:pointer; }
 .og-ai-body { display:flex; flex-direction:column; min-height:0; padding:10px; gap:7px; }
+.og-ai-body.custom { overflow:auto; }
+.og-ai-body.custom [data-api-input],.og-ai-body.custom [data-api-output] { box-sizing:border-box; width:100%; }
 .og-ai-input,.og-ai-output { box-sizing:border-box; width:100%; resize:vertical; border:1px solid #d7d7d7; border-radius:5px; padding:8px; color:#222; background:#fff; font:13px/1.5 "맑은 고딕",sans-serif; }
 .og-ai-input { min-height:88px; max-height:220px; }.og-ai-output { min-height:130px; flex:1; resize:none; }
 .og-ai-actions { display:flex; flex-wrap:wrap; gap:6px; }.og-ai-actions button { border:1px solid #ccd2c2;border-radius:5px;background:#fff;padding:6px 9px;cursor:pointer; }
 .og-ai-actions button.primary { color:#fff;background:var(--ai-color);border-color:var(--ai-color); }.og-ai-status { min-height:18px;color:#666;font-size:11px; }
 .og-ai-config-grid { display:grid;grid-template-columns:110px minmax(190px,1fr);gap:8px 10px;align-items:center; }.og-ai-config-grid textarea { min-height:88px;resize:vertical; }
+.og-ai-config-grid [hidden] { display:none !important; }
+.og-api-identity-row { grid-column:1/-1;display:grid;grid-template-columns:105px 110px 76px;gap:10px;align-items:end;justify-content:start; }
+.og-api-identity-row label { display:flex;flex-direction:column;gap:4px;min-width:0; }
+.og-api-identity-row input { box-sizing:border-box;width:100%;min-width:0; }
+.og-api-identity-row input[type="color"] { width:76px;min-height:28px; }
+@media (width <= 620px) { .og-api-identity-row { grid-template-columns:100px 100px 68px;gap:6px; } }
+.og-api-design-html { box-sizing:border-box;width:100%;min-height:180px !important;font:12px/1.45 Consolas,monospace;white-space:pre; }
 .og-ai-config-list { display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 12px; }.og-ai-config-list button { border:1px solid #d5d5d5;border-radius:5px;background:#fff;padding:5px 8px;cursor:pointer; }.og-ai-config-list button.active { border-color:var(--og-accent);background:color-mix(in srgb,var(--og-accent) 10%,#fff); }
 
 :root[data-theme-effective="dark"] .og-ai-panel { color:var(--ui-text);background:var(--ui-surface);border-color:var(--ui-border); }

@@ -578,14 +578,14 @@ async function googleAction(source, msg) {
   source?.postMessage({ type: "ogolgye:google-result", requestId: msg.requestId, ...r }, location.origin);
 }
 
-// 편집 화면의 사용자 AI 도구 ↔ 데스크톱 앱. 키는 이 바깥(메인 프로세스)의 암호화 저장소에만 둔다.
+// 편집 화면의 사용자 API 도구 ↔ 데스크톱 앱. 키는 이 바깥(메인 프로세스)의 암호화 저장소에만 둔다.
 async function aiAction(source, msg) {
   let r;
-  if (!native?.ai) r = { ok: false, error: "AI 도구는 데스크톱 앱에서 사용할 수 있습니다." };
+  if (!native?.ai) r = { ok: false, error: "API 도구는 데스크톱 앱에서 사용할 수 있습니다." };
   else if (msg.action === "list") r = await native.ai.list();
   else if (msg.action === "save") r = await native.ai.save(msg.tool);
   else if (msg.action === "remove") r = await native.ai.remove(msg.id);
-  else if (msg.action === "run") r = await native.ai.run(msg.id, msg.input);
+  else if (msg.action === "run") r = await native.ai.run(msg.id, msg.input, msg.options || {});
   else r = { ok: false, error: "알 수 없는 요청입니다." };
   source?.postMessage({ type: "ogolgye:ai-result", requestId: msg.requestId, ...r }, location.origin);
   if (r.ok && ["save", "remove"].includes(msg.action)) {

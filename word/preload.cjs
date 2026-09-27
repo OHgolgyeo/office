@@ -22,6 +22,6 @@ contextBridge.exposeInMainWorld("ogolgye", {
     list: () => ipcRenderer.invoke("ai:list"),
     save: (tool) => ipcRenderer.invoke("ai:save", tool),
     remove: (id) => ipcRenderer.invoke("ai:remove", { id }),
-    run: (id, input) => ipcRenderer.invoke("ai:run", { id, input }),
+    run: (id, input, options) => ipcRenderer.invoke("ai:run", { id, input, options }),
   },
 });

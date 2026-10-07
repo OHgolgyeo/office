@@ -57,7 +57,11 @@
       "vendor/**",
       "models/**",
       "licenses/**",
-      "!**/*.log"
+      "!**/*.log",
+      "!node_modules/onnxruntime-node/bin/napi-v6/!(${platform})/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**",
+      "!vendor/rhwp-studio/*.d.ts",
+      "!vendor/rhwp-studio/manifest.webmanifest"
     ],
     "win": {
       "target": [
@@ -69,12 +73,7 @@
         }
       ],
       "icon": "build/icon.png",
-      "artifactName": "Ogolgye-Word-Setup-${version}.${ext}",
-      "files": [
-        "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
-        "!node_modules/onnxruntime-node/bin/napi-v6/linux/**",
-        "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**"
-      ]
+      "artifactName": "Ogolgye-Word-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": true,
@@ -103,11 +102,7 @@
       "icon": "build/icon.png",
       "category": "public.app-category.productivity",
       "identity": "-",
-      "artifactName": "Ogolgye-Word-${version}-mac-${arch}.${ext}",
-      "files": [
-        "!node_modules/onnxruntime-node/bin/napi-v6/win32/**",
-        "!node_modules/onnxruntime-node/bin/napi-v6/linux/**"
-      ]
+      "artifactName": "Ogolgye-Word-${version}-mac-${arch}.${ext}"
     },
     "dmg": {
       "artifactName": "Ogolgye-Word-${version}-mac-${arch}.${ext}"

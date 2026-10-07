@@ -3,3 +3,9 @@ node_modules/
 dist/
 dist-test/
 *.log
+
+# 설치·업데이트에 필요 없는 것(개발용 — 작업 폴더에만 둔다)
+scripts/
+README.md
+vendor/rhwp-studio/*.d.ts
+vendor/rhwp-studio/manifest.webmanifest

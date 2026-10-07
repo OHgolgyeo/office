@@ -7,6 +7,7 @@ import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import os from "os";
 import crypto from "crypto";
+import { Worker } from "worker_threads";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -28,7 +29,65 @@ let modsP = null, spacerP = null;
 const mods = () => (modsP ||= Promise.all([import("./core/session.js"), import("./core/viewer-shell.js"), import("./core/src/kiwi-spacer.js")])
   .then(([se, sh, kw]) => ({ PdfSession: se.PdfSession, buildShellHtml: sh.buildShellHtml, createKiwiSpacer: kw.createKiwiSpacer })));
 const spacer = () => (spacerP ||= mods().then((m) => m.createKiwiSpacer(path.join(__dirname, "models", "kiwi"))).catch(() => null));
-export const warmUp = () => { spacer(); };          // 앱을 켤 때 미리 불러 둔다(PDF를 처음 열 때 기다리지 않게)
+// PDF 준비(글자 추출·문단 복원·글자 층)는 작업 스레드(core/prepare-worker.mjs)에서: 서버가 그동안에도 쪽 그림 요청에 답한다.
+// 작업 스레드를 못 띄우면 null(세션이 서버에서 직접 한다 — 그때만 이 스레드에서 Kiwi 를 불러온다).
+let prepW = null, prepSeq = 0, prepIdleTimer = 0;
+const prepJobs = new Map();
+// Kiwi(문단 띄어쓰기 판단)는 작업 스레드 안에서 약 900MB 를 차지하고(WebAssembly 메모리라 한 번 늘면 줄지 않는다),
+// PDF 를 준비할 때(글자 추출 뒤 문단 복원)만 쓴다 → 준비가 끝나고 이만큼 아무 PDF 도 준비하지 않으면 작업 스레드를 끝내
+// 메모리를 돌려받는다. 다음 PDF 는 새 작업 스레드가 Kiwi 를 다시 불러온다(뒤에서 약 2~3초 더).
+const PREP_IDLE_MS = +process.env.OG_PREP_IDLE_MS || 3 * 60 * 1000;
+function schedulePrepRelease() {
+  clearTimeout(prepIdleTimer);
+  prepIdleTimer = setTimeout(() => {
+    if (prepJobs.size || !prepW) return;
+    const w = prepW; prepW = null;
+    w.terminate().catch(() => {});
+  }, PREP_IDLE_MS);
+  prepIdleTimer.unref?.();
+}
+function prepareWorker() {
+  if (prepW !== null) return prepW;
+  try {
+    const w = new Worker(new URL("./core/prepare-worker.mjs", import.meta.url), { workerData: { kiwiDir: path.join(__dirname, "models", "kiwi") } });
+    w.on("message", (m) => {
+      const job = prepJobs.get(m.id); if (!job) return;
+      if (m.progress) job.onProgress(m.progress[0], m.progress[1]);
+      else if (m.phase) job.onPhase(m.phase);
+      else { prepJobs.delete(m.id); if (m.error) job.reject(new Error(m.error)); else job.resolve(m.result); if (!prepJobs.size) schedulePrepRelease(); }
+    });
+    const fail = (e) => { for (const j of prepJobs.values()) j.reject(e instanceof Error ? e : new Error(String(e))); prepJobs.clear(); if (prepW === w) prepW = null; };
+    w.on("error", fail);
+    w.on("exit", (code) => fail(new Error(`PDF 준비 작업 스레드가 끝났습니다(${code}).`)));
+    w.unref();
+    prepW = w;
+  } catch (e) { console.warn("[PDF 준비] 작업 스레드를 띄우지 못했습니다:", e?.message || e); prepW = false; }
+  return prepW;
+}
+function prepareInWorker(bytes, onProgress, onPhase) {
+  const w = prepareWorker();
+  if (!w) return Promise.reject(new Error("작업 스레드 없음"));
+  clearTimeout(prepIdleTimer);
+  return new Promise((resolve, reject) => {
+    const id = ++prepSeq;
+    prepJobs.set(id, { resolve, reject, onProgress, onPhase });
+    w.postMessage({ id, bytes }, [bytes.buffer]);
+  });
+}
+/** 앱을 끌 때: 뒤에서 도는 계산(모델 프로세스·문서화 준비 작업 스레드·OCR)을 기다리지 않고 바로 정리한다.
+ *  예전에는 레이아웃 분석이 도는 중에 끄면 계산 중인 쪽이 끝날 때까지(쪽당 최대 4초) 종료가 늦었다. */
+export async function shutdown() {
+  clearTimeout(prepIdleTimer);
+  try { if (prepW) await prepW.terminate(); } catch { /* 이미 끝남 */ }
+  prepW = null;
+  try { (await import("./core/ppstructure.js")).shutdownModels(); } catch { /* 모델을 안 씀 */ }
+  try { (await import("./core/ocr.js")).shutdownOcr(); } catch { /* OCR 을 안 씀 */ }
+}
+// 앱을 켤 때: 작업 스레드만 띄워 둔다. Kiwi 는 PDF 를 처음 준비할 때 불러온다 — 예전에는 켜자마자 불러
+// PDF 를 한 번도 열지 않아도 메인 프로세스가 약 1GB 였다.
+export const warmUp = () => { prepareWorker(); };
+// 사용자가 파일을 고르기 시작하면(서브뷰 "내 컴퓨터에서 열기"·드라이브 창) 고르는 동안 Kiwi 를 미리 불러온다 — 쓰지 않으면 똑같이 내려놓는다
+function warmKiwi() { const w = prepareWorker(); if (!w) return; w.postMessage({ warm: true }); if (!prepJobs.size) schedulePrepRelease(); }
 
 const sessions = new Map();     // id → PdfSession
 let seq = 0;
@@ -39,10 +98,20 @@ async function openPdf(bytes, name) {
   s.id = id;
   s.annotationKey = crypto.createHash("sha256").update(bytes).digest("hex");
   s.ocrLangDir = OCR_DIR;
+  s.ppDir = PP_DIR;
+  // AI 레이아웃 결과 저장 자리(파일 해시 + 모델 버전): 같은 PDF 를 다시 열면 모델을 다시 돌리지 않는다
+  s.layoutStore = path.join(path.dirname(SETTINGS_FILE), "layout-cache", s.annotationKey + "-" + PP_LAYOUT_TAG + ".json");
   s.ocrLanguages = loadSettings().ocrLanguages;
   sessions.set(id, s);
   if (sessions.size > 6) { const [oldId, old] = sessions.entries().next().value; old.close(); sessions.delete(oldId); }
-  s.prepareConversion(spacer());                      // 기다리지 않는다(뒤에서)
+  // 기다리지 않는다(뒤에서). 준비가 끝나면, 레이아웃 분석을 켜 둔 경우 모든 쪽의 레이아웃을 한 쪽씩 미리 읽어 둔다
+  // (문서화를 누를 때 96쪽이면 2분 넘게 기다렸다). 문서화를 누르면 같은 기억을 이어 쓰고 두 쪽씩 동시에 돈다.
+  s.prepareConversion(spacer, prepareInWorker).then(async () => {   // spacer: 작업 스레드를 못 쓸 때만 여기서 불러온다
+    if (!s.state.ready || !loadSettings().pdfRules?.scanTables) return;
+    const { ppModelsInstalled } = await import("./core/ppstructure.js");
+    if (!ppModelsInstalled(PP_DIR)) return;
+    s.layoutPages(s.pageSizes.map((_, i) => i), { concurrency: 1, front: false }).catch(() => {});
+  });
   return { id, name, pages: s.pageSizes.length, ms: Date.now() - s.state.t0 };
 }
 
@@ -50,11 +119,16 @@ async function openPdf(bytes, name) {
 // (시험할 때는 OGOLGYE_SETTINGS 로 다른 곳을 쓸 수 있다)
 const SETTINGS_FILE = process.env.OGOLGYE_SETTINGS || path.join(os.homedir(), ".ogolgye-word", "settings.json");
 const PDF_ANNOTATIONS_DIR = () => path.join(path.dirname(SETTINGS_FILE), "pdf-annotations");
-const DEFAULT_SETTINGS = { accent: "#6b7b3a", subviewPosition: "right", ruler: false, ocrLanguages: ["kor", "eng"] };
+// pdfRules: PDF 문서화의 "규칙 적용" — 오브젝트 그림(objectImages)·표 모양 유지(tables)·문단 사이 빈 줄 살리기(blankLines)
+//   ·스캔본 표 인식(scanTables, 모델을 내려받아야 해서 처음에는 끔)
+const DEFAULT_PDF_RULES = { objectImages: true, tables: true, blankLines: true, scanTables: false };
+const DEFAULT_SETTINGS = { accent: "#6b7b3a", subviewPosition: "right", ruler: false, ocrLanguages: ["kor", "eng"], pdfRules: DEFAULT_PDF_RULES };
+const cleanPdfRules = (v) => Object.fromEntries(Object.entries(DEFAULT_PDF_RULES).map(([k, d]) => [k, typeof v?.[k] === "boolean" ? v[k] : d]));
 function loadSettings() {
   try {
     const next = { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")) };
     next.ocrLanguages = cleanOcrLanguages(next.ocrLanguages);
+    next.pdfRules = cleanPdfRules(next.pdfRules);
     return next;
   } catch { return { ...DEFAULT_SETTINGS }; }
 }
@@ -64,6 +138,7 @@ function saveSettings(patch) {
   if (!["left", "right"].includes(next.subviewPosition)) next.subviewPosition = "right";
   next.ruler = next.ruler === true;
   next.ocrLanguages = cleanOcrLanguages(next.ocrLanguages);
+  next.pdfRules = cleanPdfRules(next.pdfRules);
   fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(next, null, 2));
   return next;
@@ -73,6 +148,30 @@ function saveSettings(patch) {
 // 언어 자료는 사용자 자료 폴더에 둔다(프로그램 폴더는 업데이트할 때 통째로 바뀌어 새로 받은 언어가 사라진다).
 // 프로그램에 들어 있는 기본 언어(한국어·영어)는 처음 한 번 복사해 온다.
 const OCR_DIR = path.join(path.dirname(SETTINGS_FILE), "ocr");
+// 스캔본 표 인식 모델(PP-Structure, 약 131MB): 켤 때 한 번 내려받는다(core/ppstructure.js)
+const PP_DIR = path.join(path.dirname(SETTINGS_FILE), "models", "pp-structure");
+const PP_LAYOUT_TAG = "dc5670eb";   // 레이아웃 모델(PP-DocLayoutV3.onnx sha256 앞부분) — 모델이 바뀌면 저장된 결과를 쓰지 않는다
+const ppInstall = { running: false, done: 0, total: 0, error: "" };
+// 모델 실행 엔진(onnxruntime-node)이 이 컴퓨터에서 돌아가는가 — 맥은 애플 실리콘(arm64)용만 있어 인텔 맥에서는 쓸 수 없다
+let ppSupported = null;
+async function ppRuntimeOk() {
+  if (ppSupported === null) ppSupported = await import("onnxruntime-node").then(() => true, () => false);
+  return ppSupported;
+}
+async function ppStatus() {
+  const { ppModelsInstalled } = await import("./core/ppstructure.js");
+  return { supported: await ppRuntimeOk(), installed: ppModelsInstalled(PP_DIR), ...ppInstall };
+}
+async function ppStartInstall() {
+  const { installPpModels, ppModelsInstalled } = await import("./core/ppstructure.js");
+  if (!(await ppRuntimeOk())) return { ...(await ppStatus()), error: "이 컴퓨터에서는 표 인식 모델을 실행할 수 없습니다(인텔 맥 등)." };
+  if (ppInstall.running || ppModelsInstalled(PP_DIR)) return ppStatus();
+  Object.assign(ppInstall, { running: true, done: 0, total: 0, error: "" });
+  installPpModels(PP_DIR, (done, total) => Object.assign(ppInstall, { done, total }))
+    .catch((e) => { ppInstall.error = String(e?.message || e); })
+    .finally(() => { ppInstall.running = false; });
+  return ppStatus();
+}
 const BUILTIN_OCR_DIR = path.join(__dirname, "models", "ocr");
 try {
   fs.mkdirSync(OCR_DIR, { recursive: true });
@@ -238,8 +337,22 @@ const API = {
 async function servePdf(req, res, url, s, what) {
   if (what === "view") { const h = (await mods()).buildShellHtml(s.id, s.meta()); sendBytes(res, h.replace("</head>", accentStyle() + "</head>"), MIME[".html"]); return; }
   if (what === "status") { sendJson(res, 200, s.meta()); return; }
+  // 서브뷰에서 PDF 탭을 닫으면: 세션(쪽 그림·글자층·문단 복원 결과, 탭마다 50~110MB)을 바로 내려놓는다
+  if (what === "close" && req.method === "POST") { s.close(); sessions.delete(s.id); sendJson(res, 200, { ok: true }); return; }
   if (what === "annotations") {
     sendJson(res, 200, req.method === "POST" ? savePdfAnnotations(s, await readJson(req, 2 * 1024 * 1024)) : loadPdfAnnotations(s), { "Cache-Control": "no-store" });
+    return;
+  }
+  if (what === "images.zip") {
+    // 그림 모두 내려받기: 보기 화면의 그림(배경 없이 꺼낸 오브젝트)을 쪽 순서대로 한 ZIP 으로
+    // POST {ids:["쪽:그림id", …]} 이면 목록에서 고른 그림만(그림 내보내기 창), GET 이면 모두
+    const body = req.method === "POST" ? await readJson(req, 1024 * 1024) : null;
+    const entries = s.figureZipEntries(Array.isArray(body?.ids) ? body.ids : null);
+    if (!entries) { sendJson(res, 409, { error: "아직 그림을 찾는 중입니다." }); return; }
+    if (!entries.length) { sendJson(res, 404, { error: body ? "고른 그림을 꺼내지 못했습니다." : "이 PDF에는 꺼낼 그림이 없습니다." }); return; }
+    const { zipBytes } = await import("./core/export-files.js");
+    const base = String(s.name || "PDF").replace(/\.pdf$/i, "") + "-그림.zip";
+    sendBytes(res, zipBytes(entries), "application/zip", { "Content-Disposition": `attachment; filename="images.zip"; filename*=UTF-8''${encodeURIComponent(base)}`, "Cache-Control": "no-store" });
     return;
   }
   if (what === "figures") { const list = s.figureList(); sendJson(res, list ? 200 : 409, list || []); return; }
@@ -247,7 +360,9 @@ async function servePdf(req, res, url, s, what) {
     const pages = (url.searchParams.get("pages") || "").split(",").filter(Boolean).map(Number);
     if (!pages.length || pages.some((n) => !Number.isInteger(n) || n < 0 || n >= s.pageSizes.length)) { sendJson(res, 400, { error: "페이지 범위가 올바르지 않습니다." }); return; }
     // 사진·스캔 쪽은 여기서 그림 속 글자(OCR)를 읽어 함께 넣는다(아직 읽지 않은 쪽이면 시간이 걸린다)
-    const c = await s.content(pages, { includeImages: url.searchParams.get("images") === "1" });
+    // 규칙 적용(images=1: 오브젝트 그림, tables=1: 표 모양 유지, blanks=1: 문단 사이 빈 줄 살리기, scan=1: 스캔본 표 인식). 모두 없으면 글만
+    const on = (k) => url.searchParams.get(k) === "1";
+    const c = await s.content(pages, { includeImages: on("images"), keepTables: on("tables"), keepBlankLines: on("blanks"), scanTables: on("scan") });
     if (!c) { sendJson(res, 409, { error: "문서화 준비 중입니다." }); return; }
     if (!c.text.trim() && !s.ocrReady()) { sendJson(res, 409, { error: "가져올 본문이 없습니다. 사진·스캔 PDF라면 도구 → 환경 설정 → OCR 언어에서 언어 자료를 설치해 주세요." }); return; }
     sendJson(res, 200, { text: c.text, html: c.html, pages: pages.map((n) => n + 1) });
@@ -272,13 +387,19 @@ async function servePdf(req, res, url, s, what) {
 }
 
 export function startServer(port = 0) {
+  if (process.env.OG_TRACE) {                                    // 진단(OG_TRACE=1): 서버가 막힌 구간(200ms 넘게)과 느린 요청을 터미널에
+    let last = performance.now();
+    setInterval(() => { const n = performance.now(), lag = n - last - 50; if (lag > 200) console.error(`[lag] ${Math.round(lag)}ms at ${new Date().toISOString().slice(11, 23)}`); last = n; }, 50).unref();
+  }
   const server = http.createServer(async (req, res) => {
+    if (process.env.OG_TRACE) { const t0 = performance.now(); res.on("finish", () => { const ms = performance.now() - t0; if (ms > 150 || /view|status/.test(req.url)) console.error(`[req] ${Math.round(ms)}ms ${req.url.slice(0, 60)} at ${new Date().toISOString().slice(11, 23)}`); }); }
     try {
       const url = new URL(req.url, "http://localhost");
       const p = url.pathname;
       if (p === "/") { res.writeHead(302, { Location: "/app/" }).end(); return; }
       if (API[p] && req.method === "POST") { await API[p](req, res, url); return; }
       if (p === "/api/blank") { sendBytes(res, await blankDocument()); return; }
+      if (p === "/api/prepare-warm") { warmKiwi(); sendJson(res, 200, { ok: true }); return; }
       // 제품 정보: 오골계 워드 라이선스와 오픈소스 라이선스 원문(core/licenses.js)
       if (p === "/api/licenses" || p.startsWith("/api/licenses/") || p === "/licenses/chromium") {
         const lic = await import("./core/licenses.js");
@@ -297,6 +418,7 @@ export function startServer(port = 0) {
         catch (e) { sendJson(res, e.status || 500, { error: String(e?.message || e) }); }
         return;
       }
+      if (p === "/api/pp-structure") { sendJson(res, 200, req.method === "POST" ? await ppStartInstall() : await ppStatus(), { "Cache-Control": "no-store" }); return; }
       if (p === "/api/settings") { sendJson(res, 200, req.method === "POST" ? saveSettings(await readJson(req, 65536)) : loadSettings()); return; }
       const pm = p.match(/^\/pdf\/(\d+)\/(.+)$/);
       if (pm) {

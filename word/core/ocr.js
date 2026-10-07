@@ -35,6 +35,13 @@ async function worker(langDir, languages) {
   return workerP;
 }
 
+/** 앱을 끌 때: OCR 작업자를 끝낸다(읽는 중이어도 기다리지 않는다) */
+export function shutdownOcr() {
+  const p = workerP; workerP = null; workerKey = "";
+  queue.length = 0;
+  if (p) p.then((w) => w.terminate()).catch(() => {});
+}
+
 // 한 번에 하나씩(Tesseract 작업자 하나를 돌려 쓴다)
 function enqueue(fn) {
   return new Promise((ok, fail) => { queue.push({ fn, ok, fail }); pump(); });
@@ -92,23 +99,45 @@ export async function ocrRegion(page, bbox, langDir, S = 3, opts = {}) {
       rgba[t] = M.HEAPU8[s + 2]; rgba[t + 1] = M.HEAPU8[s + 1]; rgba[t + 2] = M.HEAPU8[s]; rgba[t + 3] = 255;
     }
   } finally { M._FPDFBitmap_Destroy(bmp); for (const [o, m] of restore) M._FPDFTextObj_SetTextRenderMode(o, m); }
+  // opts.autoInvert: 어두운 바탕(검은 머리 칸의 흰 글자 등)이면 색을 뒤집어 읽는다 — OCR 은 밝은 바탕의 어두운 글자를 잘 읽는다
+  if (opts.autoInvert) {
+    let sum = 0;
+    for (let i = 0; i < rgba.length; i += 4) sum += rgba[i] * 0.3 + rgba[i + 1] * 0.59 + rgba[i + 2] * 0.11;
+    if (sum / (rgba.length / 4) < 110) for (let i = 0; i < rgba.length; i += 4) { rgba[i] = 255 - rgba[i]; rgba[i + 1] = 255 - rgba[i + 1]; rgba[i + 2] = 255 - rgba[i + 2]; }
+  }
+  // opts.loose: 표 칸처럼 짧은 글을 읽을 때는 잡음 거르기(기호가 든 줄 버리기 등)를 느슨하게 — "이름 | PC①" 같은 칸 글이 버려졌다
+  const keepLine = opts.loose ? (l) => l.confidence >= 45 && /[\p{L}\p{N}]/u.test(l.text) : goodLine;
 
   const tryAngle = async (deg) => {
     const w = await worker(langDir, opts.languages);
     // 무손실 PNG로 넘겨 JPEG 끝 마커 경고를 피하고, 실제 렌더 배율에 맞는 DPI를 알려
     // Tesseract가 매번 해상도를 추정하며 진단 메시지를 내지 않게 한다.
     const img = PNG.sync.write({ data: rotateRGBA(rgba, cw, ch, deg), width: cw, height: ch });
-    const { data } = await w.recognize(img, { user_defined_dpi: String(Math.round(72 * S)) }, { blocks: true });
+    // opts.psm: 읽는 방식을 잠시 바꾼다(표 칸 = "6" 한 덩어리 글 — 흩어진 글자 방식은 칸의 한 글자 숫자를 놓친다)
+    if (opts.psm) await w.setParameters({ tessedit_pageseg_mode: opts.psm });
+    let data;
+    try { ({ data } = await w.recognize(img, { user_defined_dpi: String(Math.round(72 * S)) }, { blocks: true })); }
+    finally { if (opts.psm) await w.setParameters({ tessedit_pageseg_mode: "11" }); }   // 기본(흩어진 글자)으로 되돌린다
     // 문단 번호를 줄에 붙여 둔다(여러 줄 문단은 복사할 때 이어 붙인다)
     let pi = 0;
-    const lines = (data.blocks || []).flatMap((b) => b.paragraphs.flatMap((p) => { const k = pi++; return p.lines.map((l) => Object.assign(l, { _par: k })); })).filter(goodLine);
+    const lines = (data.blocks || []).flatMap((b) => b.paragraphs.flatMap((p) => { const k = pi++; return p.lines.map((l) => Object.assign(l, { _par: k })); })).filter(keepLine);
     const score = lines.reduce((n, l) => n + l.confidence * l.text.replace(/\s/g, "").length, 0);
     return { deg, score, lines };
   };
   return enqueue(async () => {
-    // 거칠게(-4, 0, 4) 본 뒤 가장 좋은 각도 양옆(±2)을 더 본다(opts.angles 가 있으면 그 각도만)
+    // 거칠게(-4, 0, 4) 본 뒤 가장 좋은 각도 양옆(±2)을 더 본다(opts.angles 가 있으면 그 각도만).
+    // 반듯한 스캔은 0°에서 이미 잘 읽힌다: 0°에서 읽은 글자의 평균 신뢰도가 85 이상이면 다른 각도는 보지 않는다(쪽당 수십 초 → 수 초).
     const tried = new Map();
-    for (const d of opts.angles || [0, -4, 4]) tried.set(d, await tryAngle(d));
+    if (!opts.angles) {
+      const zero = await tryAngle(0), chars = zero.lines.reduce((n, l) => n + l.text.replace(/\s/g, "").length, 0);
+      tried.set(0, zero);
+      if (chars >= 10 && zero.score / chars >= 85) {
+        return { deg: 0, S, crop: { x0, y0, w: cw, h: ch },
+          lines: zero.lines.map((l) => ({ text: l.text.trim(), conf: l.confidence, par: l._par,
+            words: (l.words || []).filter((wd) => wd.text.trim() && wd.confidence >= 40).map((wd) => ({ text: wd.text.trim(), bbox: wd.bbox })) })) };
+      }
+    }
+    for (const d of opts.angles || [0, -4, 4]) if (!tried.has(d)) tried.set(d, await tryAngle(d));
     let best = [...tried.values()].sort((a, b) => b.score - a.score)[0];
     if (!opts.angles) for (const d of [best.deg - 2, best.deg + 2]) if (!tried.has(d)) tried.set(d, await tryAngle(d));
     best = [...tried.values()].sort((a, b) => b.score - a.score)[0];

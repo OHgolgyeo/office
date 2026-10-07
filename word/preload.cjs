@@ -16,7 +16,8 @@ contextBridge.exposeInMainWorld("ogolgye", {
     disconnect: () => ipcRenderer.invoke("google:disconnect"),
     send: (model, title, pageless) => ipcRenderer.invoke("google:send", { model, title, pageless }),
     list: (opt) => ipcRenderer.invoke("google:list", opt),
-    fetch: (id) => ipcRenderer.invoke("google:fetch", { id }),
+    warm: () => ipcRenderer.invoke("google:warm"),
+    fetch: (file) => ipcRenderer.invoke("google:fetch", typeof file === "string" ? { id: file } : { file }),
   },
   ai: {
     list: () => ipcRenderer.invoke("ai:list"),

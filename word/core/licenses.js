@@ -19,6 +19,11 @@ const ITEMS = [
     files: [["PDFium 라이선스", "licenses/extra/pdfium.LICENSE.txt"]], packages: ["@hyzyla/pdfium"] },
   { id: "tesseract", name: "Tesseract.js", use: "그림·스캔 속 글자 인식(OCR)", homepage: "https://github.com/naptha/tesseract.js",
     packages: ["tesseract.js", "tesseract.js-core"], files: [["글자 인식 학습 자료(tessdata_fast) 라이선스", "licenses/extra/tessdata_fast.LICENSE.txt"]] },
+  { id: "onnxruntime", name: "ONNX Runtime", use: "스캔본 표 인식 모델 실행", homepage: "https://github.com/microsoft/onnxruntime", license: "MIT",
+    packages: ["onnxruntime-node", "onnxruntime-common"],
+    files: [["ONNX Runtime 라이선스", "licenses/extra/onnxruntime.LICENSE.txt"], ["ONNX Runtime이 쓰는 오픈소스", "licenses/extra/onnxruntime.ThirdPartyNotices.txt"]] },
+  { id: "paddleocr", name: "PaddleOCR PP-Structure", use: "스캔본 표 인식 모델(PP-DocLayoutV3·SLANet_plus, 켤 때 내려받음)", homepage: "https://github.com/PaddlePaddle/PaddleOCR", license: "Apache-2.0",
+    files: [["PaddleOCR 라이선스", "licenses/extra/paddleocr.LICENSE.txt"]] },
   { id: "kiwi", name: "Kiwi", use: "한국어 띄어쓰기 복원", homepage: "https://github.com/bab2min/Kiwi", license: "Apache-2.0",
     packages: ["kiwi-nlp"], files: [["Kiwi와 언어 모델 라이선스", "licenses/extra/kiwi-model.LICENSE.txt"]] },
   { id: "phosphor", name: "Phosphor Icons", use: "아이콘", homepage: "https://phosphoricons.com", packages: ["@phosphor-icons/web"] },
@@ -65,7 +70,7 @@ export function licenseSummary() {
     app: { name: "오골계 워드", version },
     license: read(at("LICENSE")) || "",
     items: ITEMS.map((it) => {
-      const main = collect([it.packages[0]], false)[0];
+      const main = it.packages?.length ? collect([it.packages[0]], false)[0] : null;   // 패키지 없는 항목(내려받는 모델 등)
       return { id: it.id, name: it.name, use: it.use, homepage: it.homepage, license: it.license || (main ? licenseOf(main.pkg) : "") };
     }),
   };
@@ -77,7 +82,7 @@ export function licenseDetail(id) {
   if (!it) return null;
   const sections = [];
   for (const [title, file] of it.files || []) { const text = read(at(file)); if (text) sections.push({ title, text }); }
-  for (const { dir, pkg } of collect(it.packages, it.deep !== false)) {
+  for (const { dir, pkg } of collect(it.packages || [], it.deep !== false)) {
     const files = fs.readdirSync(dir).filter((f) => LICENSE_FILE.test(f)).sort();
     const title = `${pkg.name}${pkg.version ? " " + pkg.version : ""} (${licenseOf(pkg)})`;
     if (!files.length) sections.push({ title, text: `이 부품에는 라이선스 파일이 들어 있지 않습니다. 부품 정보(package.json)에 적힌 라이선스: ${licenseOf(pkg)}` });

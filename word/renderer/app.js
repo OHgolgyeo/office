@@ -1,11 +1,11 @@
 // 오골계 워드 화면
 import { createEditor } from "/vendor/rhwp-editor/index.js";
+import { importDocument, SUBVIEW_EXTENSIONS } from "./doc-import.js";
 
 const STUDIO = "/studio/";
 const $ = (s) => document.querySelector(s);
 const native = window.ogolgye || null;               // Electron 이면 파일 대화상자를 쓸 수 있다
-const DOC_FILTERS = [{ name: "한글 문서", extensions: ["hwp", "hwpx"] }];
-const PDF_FILTERS = [{ name: "PDF", extensions: ["pdf"] }];
+const SUBVIEW_FILTERS = [{ name: "문서 (PDF·한글·Word·OpenDocument·RTF·텍스트·Markdown·HTML·EPUB·Excel·PowerPoint)", extensions: SUBVIEW_EXTENSIONS }, { name: "모든 파일", extensions: ["*"] }];
 const EXPORT_FILTERS = {
   pdf: [{ name: "PDF 문서", extensions: ["pdf"] }],
   txt: [{ name: "일반 텍스트", extensions: ["txt"] }],
@@ -18,7 +18,11 @@ const EXPORT_FILTERS = {
 };
 
 const main = { editor: null, name: "새 문서.hwpx", path: null, dirty: false };
-const sub = { kind: null, editor: null, name: "", path: null, dirty: false, viewerId: null };
+const emptySub = () => ({ id: "", kind: null, editor: null, name: "", path: null, dirty: false, viewerId: null, element: null });
+const subTabs = [];
+const spareSubEditors = [], SPARE_SUB_EDITORS = 3;                 // 닫은 서브 문서 편집기를 숨겨 두었다가 다음 문서 탭에 다시 쓴다(closeSub·openSubDoc)
+let sub = emptySub(), nextSubId = 1;
+const subTabsShell = $("#sub-tabs-shell"), subTabsElement = $("#sub-tabs"), statusElement = $("#status"), subCloseElement = $("#sub-close");
 
 // 창 제목: 프로그램 이름 - 주 문서 이름 (데스크톱 앱은 제목 표시줄을 화면이 직접 그린다)
 if (native) document.documentElement.classList.add("native", native.platform === "darwin" ? "mac" : "win");
@@ -26,8 +30,15 @@ function updateTitle() {
   const title = main.name ? `오골계 워드 - ${main.name}` : "오골계 워드";
   document.title = title; $("#app-title").textContent = title;
 }
-const status = (t) => { $("#status").textContent = t || ""; };
-const setDirty = (who, v) => { who.dirty = v; if (who === sub) $("#sub-dirty").hidden = !v; };
+// 상태 문구: 끝난 일의 알림("…했습니다")은 잠시 뒤 지운다. 진행 중 문구("…하고 있습니다…")는 다음 문구가 바꿀 때까지 둔다.
+// (예전에는 드라이브에서 가져온 문서 탭을 닫아도 "…가져왔습니다." 가 탭 줄에 그대로 남았다)
+let statusTimer = 0;
+const status = (t) => {
+  statusElement.textContent = t || "";
+  clearTimeout(statusTimer);
+  if (t && !/…$/.test(t)) statusTimer = setTimeout(() => { if (statusElement.textContent === t) statusElement.textContent = ""; }, 6000);
+};
+const setDirty = (who, v) => { who.dirty = v; if (who !== main) renderSubTabs(); };
 
 async function blankBytes() { return new Uint8Array(await (await fetch("/api/blank")).arrayBuffer()); }
 
@@ -71,36 +82,153 @@ function showSub(on) {
   $("#sub-pane").hidden = !on; $("#splitter").hidden = !on;
   notifyMainResize();
 }
-async function closeSub() {
-  if (sub.kind === "doc" && sub.dirty && !confirm("서브뷰 문서에 저장하지 않은 내용이 있습니다. 닫을까요?")) { return false; }
-  sub.editor?.destroy?.();
-  Object.assign(sub, { kind: null, editor: null, name: "", path: null, dirty: false, viewerId: null });
-  $("#sub-body").innerHTML = '<div id="sub-drop" class="drop">PDF 또는 HWP/HWPX 파일을 여기에 끌어다 놓거나<br>위쪽 서브뷰 메뉴에서 여세요.</div>';
-  bindDrop(); showSub(false); return true;
+function renderSubTabs() {
+  const strip = subTabsElement; if (!strip) return;
+  strip.innerHTML = "";
+  for (const tab of subTabs) {
+    const item = document.createElement("div");
+    item.className = "sub-tab" + (tab === sub ? " active" : ""); item.dataset.tabId = tab.id; item.role = "tab";
+    item.ariaSelected = tab === sub ? "true" : "false"; item.title = tab.name;
+    const kind = document.createElement("span"); kind.className = "sub-tab-kind"; kind.textContent = tab.kind === "pdf" ? "PDF" : "문서";
+    const name = document.createElement("span"); name.className = "sub-tab-name"; name.textContent = tab.name;
+    const dirty = document.createElement("span"); dirty.className = "sub-tab-dirty"; dirty.textContent = tab.dirty ? "●" : "";
+    const close = document.createElement("button"); close.className = "sub-tab-x"; close.type = "button"; close.title = `${tab.name} 닫기`; close.textContent = "×";
+    item.append(kind, name, dirty, close); strip.appendChild(item);
+  }
+  strip.querySelector(".sub-tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
-function subHead(kind, name) {
-  $("#sub-kind").textContent = kind === "pdf" ? "PDF" : "문서"; $("#sub-kind").className = "kind " + kind;
-  $("#sub-name").textContent = name; setDirty(sub, false);
+const SUB_TABS_CSS = `
+#sub-tabs-shell{position:sticky;top:0;z-index:20000;display:flex;align-items:center;gap:6px;min-height:32px;padding:3px 8px 0;border-bottom:1px solid #e6e7e3;background:#fff;font:12px "Malgun Gothic","Noto Sans KR",system-ui,sans-serif;color:#444;box-sizing:border-box}
+#sub-tabs{display:flex;align-self:stretch;min-width:0;max-width:72%;overflow-x:auto;overflow-y:hidden;gap:2px;scrollbar-width:thin}
+#sub-tabs-shell .spacer{flex:1}.status{color:#888;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-right:6px}
+#sub-tabs-shell>button{border:1px solid #e6e7e3;background:#fff;border-radius:5px;padding:1px 8px;font:inherit;cursor:pointer;color:#555}
+#sub-tabs-shell>button:hover{background:color-mix(in srgb,var(--og-accent) 12%,#fff);border-color:var(--og-accent)}
+.sub-tab{display:flex;align-items:center;gap:5px;min-width:90px;max-width:190px;padding:3px 5px 3px 8px;border:1px solid transparent;border-radius:6px 6px 0 0;background:#f6f6f4;color:#666;cursor:pointer;white-space:nowrap;box-sizing:border-box}
+.sub-tab:hover{background:color-mix(in srgb,var(--og-accent) 12%,#fff)}.sub-tab.active{border-color:#e6e7e3;border-bottom-color:#fff;background:#fff;color:#222;box-shadow:inset 0 2px var(--og-accent)}
+.sub-tab-kind{flex:none;color:var(--og-accent);font-size:10px;font-weight:700}.sub-tab-name{min-width:0;overflow:hidden;text-overflow:ellipsis}.sub-tab-dirty{flex:none;color:var(--og-accent);font-size:9px}
+.sub-tab-x{flex:none;border:0!important;background:transparent!important;border-radius:3px!important;padding:0 3px!important;line-height:16px!important;color:#888!important}.sub-tab-x:hover{background:color-mix(in srgb,var(--og-accent) 16%,#fff)!important;color:#333!important}`;
+function parkSubTabs() {
+  if (subTabsShell.parentNode !== $("#sub-body")) $("#sub-body").prepend(subTabsShell);
+}
+function mountSubTabs(tab) {
+  const frame = tab?.editor?.element || tab?.element?.querySelector("iframe");
+  const doc = frame?.contentDocument;
+  const anchor = tab?.kind === "doc" ? doc?.getElementById("menu-bar") : doc?.querySelector(".menu");
+  if (!anchor) { parkSubTabs(); return false; }
+  let style = doc.getElementById("og-sub-tabs-style");
+  if (!style) {
+    style = doc.createElement("style"); style.id = "og-sub-tabs-style";
+    style.textContent = SUB_TABS_CSS + (tab.kind === "pdf" ? ".menu{top:32px!important}" : "");
+    doc.head.appendChild(style);
+  }
+  doc.body.prepend(subTabsShell); renderSubTabs(); return true;
+}
+function activateSub(tab) {
+  if (!tab || !subTabs.includes(tab)) return;
+  sub = tab;
+  for (const item of subTabs) if (item.element) item.element.hidden = item !== tab;
+  mountSubTabs(tab);
+  renderSubTabs();
+  notifyMainResize();
+}
+function makeSub(kind, name, path = null, reuseElement = null) {
+  const tab = { ...emptySub(), id: `sub-${nextSubId++}`, kind, name, path };
+  if (reuseElement) tab.element = reuseElement;                   // 숨겨 둔 편집기 자리(옮기면 iframe 이 다시 불러와지므로 그 자리 그대로)
+  else { tab.element = document.createElement("div"); tab.element.className = "sub-tab-page"; $("#sub-body").appendChild(tab.element); }
+  tab.element.dataset.tabId = tab.id; subTabs.push(tab); showSub(true); activateSub(tab);
+  $("#sub-drop").hidden = true;
+  return tab;
+}
+async function closeSub(tab = sub, skipConfirm = false) {
+  if (!subTabs.includes(tab)) return true;
+  if (!skipConfirm && tab.kind === "doc" && tab.dirty && !confirm(`서브뷰 문서 '${tab.name}'에 저장하지 않은 내용이 있습니다. 닫을까요?`)) return false;
+  if (tab.kind === "pdf" && tab.viewerId) {
+    // 아직 안 보낸 주석을 먼저 보내고(최대 0.8초), 서버의 PDF 세션을 내려놓는다(남겨 두면 탭마다 50~110MB 가 쌓였다)
+    const w = tab.element?.querySelector("iframe")?.contentWindow;
+    await Promise.race([Promise.resolve().then(() => w?.ogFlushAnnotations?.()).catch(() => {}), new Promise((r) => setTimeout(r, 800))]);
+    fetch(`/pdf/${tab.viewerId}/close`, { method: "POST" }).catch(() => {});
+    if (!subTabs.includes(tab)) return true;                       // 기다리는 사이 이미 닫혔다
+  }
+  // 탭 줄은 보이는 탭의 iframe 안에 들어가 있다. 그 iframe 을 먼저 지우면 브라우저가 문서를 닫으면서 탭 줄의
+  // 이벤트(✕·탭 ×·탭 전환·휠)를 모두 떼어 버려, 한 번 다 닫은 뒤로는 탭 줄이 먹통이 됐다 → 지우기 전에 꺼내 둔다
+  parkSubTabs();
+  const index = subTabs.indexOf(tab);
+  if (tab.kind === "doc" && tab.editor && spareSubEditors.length < SPARE_SUB_EDITORS) {
+    // 문서 편집기는 지워도 크로미움 안쪽에서 편집 화면 전체(약 20MB)를 놓아주지 않아 탭을 여닫을수록 메모리가 쌓였다
+    // → 몇 개는 숨겨 두었다가 다음 문서 탭에 다시 쓴다(다른 파일을 여는 것과 같다)
+    tab.element.hidden = true; delete tab.element.dataset.tabId;
+    spareSubEditors.push({ element: tab.element, editor: tab.editor });
+  } else { tab.editor?.destroy?.(); tab.element?.remove(); }
+  subTabs.splice(index, 1);
+  status("");                                                      // 닫은 탭에 대한 알림이 남지 않게
+  if (tab === sub) {
+    const next = subTabs[Math.min(index, subTabs.length - 1)];
+    if (next) activateSub(next); else sub = emptySub();
+  } else if (subTabs.includes(sub)) mountSubTabs(sub);           // 다른 탭을 닫았으면 꺼내 둔 탭 줄을 보던 탭에 다시
+  renderSubTabs();
+  if (!subTabs.length) { parkSubTabs(); $("#sub-drop").hidden = false; showSub(false); }
+  return true;
+}
+async function closeAllSubTabs() {
+  const dirty = subTabs.filter((tab) => tab.kind === "doc" && tab.dirty);
+  if (dirty.length && !confirm(`서브뷰에 저장하지 않은 문서가 ${dirty.length}개 있습니다. 모두 닫을까요?`)) return false;
+  for (const tab of [...subTabs]) await closeSub(tab, true);
+  return true;
 }
 async function openSubPdf(file) {
-  if (sub.kind && !(await closeSub())) return;
-  showSub(true); subHead("pdf", file.name);
-  $("#sub-body").innerHTML = '<div class="busy">PDF를 불러오고 있습니다.</div>';
+  const tab = makeSub("pdf", file.name, file.path);
+  tab.element.innerHTML = '<div class="busy">PDF를 불러오고 있습니다.</div>';
   const r = await fetch("/api/pdf?name=" + encodeURIComponent(file.name), { method: "POST", body: file.bytes });
   const info = await r.json();
-  if (!r.ok) { $("#sub-body").innerHTML = `<div class="busy">PDF를 열 수 없습니다. (${info.error || r.status})</div>`; return; }
-  Object.assign(sub, { kind: "pdf", name: file.name, path: file.path, viewerId: info.id });
-  $("#sub-body").innerHTML = `<iframe src="/pdf/${info.id}/view" title="PDF 보기"></iframe>`;
+  if (!r.ok) { tab.element.innerHTML = `<div class="busy">PDF를 열 수 없습니다. (${info.error || r.status})</div>`; return; }
+  tab.viewerId = info.id;
+  tab.element.innerHTML = `<iframe src="/pdf/${info.id}/view" title="PDF 보기"></iframe>`;
+  const frame = tab.element.querySelector("iframe");
+  frame.addEventListener("load", () => { if (tab === sub) mountSubTabs(tab); }, { once: true });
   status("");
 }
+// 서브뷰에 아무 문서나: PDF 는 PDF 보기, 한글은 그대로, 그 밖(Word·ODT·RTF·텍스트·Markdown·HTML·EPUB·CSV·Excel·PowerPoint)은
+// 한글 문서(HWPX)로 바꿔서 편집기로 연다(renderer/doc-import.js). 이 컴퓨터 안에서만 바꾼다.
+async function openSubAny(file) {
+  try {
+    const kind = await hwpxOrOriginal(file);
+    if (kind.pdf) return await openSubPdf(file);
+    await openSubDoc(kind.file);
+    status(kind.converted ? `${file.name}을(를) 한글 문서로 바꿔 열었습니다.` : "");
+  } catch (err) { status(String(err?.message || err)); alert(String(err?.message || err)); }
+}
+// 문서 → { pdf: true } 또는 { file: 한글 문서(HWPX/HWP) 파일, converted }
+async function hwpxOrOriginal(file) {
+  const r = await importDocument(file.name, file.bytes);
+  if (r.kind === "pdf") return { pdf: true };
+  if (r.kind === "hwp") return { file, converted: false };
+  status(`${file.name}을(를) 한글 문서로 바꾸고 있습니다…`);
+  const title = String(file.name).replace(/\.[^.]+$/, "");
+  const blocks = r.kind === "docx" ? modelFromDocx(r.parts) : modelFromHtml(r.html);
+  if (!blocks.length) throw new Error(`${file.name}에서 가져올 내용을 찾지 못했습니다.`);
+  const bytes = await hwpxFromModelBytes({ title, blocks }, null);
+  return { file: { name: title + ".hwpx", path: null, bytes: new Uint8Array(bytes) }, converted: true };
+}
 async function openSubDoc(file) {
-  if (sub.kind && !(await closeSub())) return;
-  showSub(true); subHead("doc", file.name);
-  $("#sub-body").innerHTML = "";
-  sub.kind = "doc";
-  sub.editor = await newEditor($("#sub-body"), sub);
-  await sub.editor.loadFile(file.bytes, file.name);
-  Object.assign(sub, { name: file.name, path: file.path }); setDirty(sub, false);
+  let spare = spareSubEditors.pop();
+  if (spare) {
+    // 숨긴 채로 먼저 불러온 뒤 보인다(보이고 나서 바꾸면 앞 문서의 쪽을 그리려다 "페이지 N 정보가 없습니다"가 났다).
+    // 닫을 때 이미 "저장하지 않은 내용" 확인을 받았다 — 편집기의 같은 확인(고친 문서 위에 열기 거부)은 건너뛴다
+    try { await spare.editor.loadFile(file.bytes, file.name, { skipUnsavedGuard: true }); }
+    catch { spare.editor.destroy?.(); spare.element.remove(); spare = null; }   // 숨겨 둔 편집기가 고장 났으면 새로
+  }
+  const tab = makeSub("doc", file.name, file.path, spare?.element);
+  if (spare) {
+    tab.editor = spare.editor;
+    // 숨긴 동안(크기 0) 잡힌 배치를 보인 크기로 다시 맞춘다(페이지 없음 보기는 창 너비를 따른다)
+    const send = () => tab.editor.element?.contentWindow?.postMessage({ type: "ogolgye:host-resize" }, location.origin);
+    requestAnimationFrame(() => requestAnimationFrame(send)); setTimeout(send, 320);
+  } else {
+    tab.editor = await newEditor(tab.element, tab);
+    await tab.editor.loadFile(file.bytes, file.name);
+  }
+  if (tab === sub) mountSubTabs(tab);
+  setDirty(tab, false);
 }
 
 // ── 테마색: 앱 화면 + 모든 편집 화면 + PDF 창에 적용하고 저장
@@ -148,24 +276,33 @@ const syncFrames = () => {
   // 편집 화면에 데스크톱 앱 기능(원래 용지로 PDF 저장 등)이 있는지 알린다
   main.editor?.element?.contentWindow?.postMessage({ type: "ogolgye:host-info", native: !!native?.pdf }, location.origin);
 };
-new MutationObserver((records) => {
+const workRoot = $("#work");
+const frameObserver = new MutationObserver((records) => {
   for (const r of records) for (const n of r.addedNodes) {
     for (const fr of n.nodeName === "IFRAME" ? [n] : n.querySelectorAll?.("iframe") || []) fr.addEventListener("load", syncFrames);
   }
-}).observe($("#work"), { childList: true, subtree: true });
+});
+if (workRoot) frameObserver.observe(workRoot, { childList: true, subtree: true });
 
 // 편집 화면 메뉴의 "서브뷰"에서 온 요청
 async function subviewAction(action) {
-  if (action === "close") { await closeSub(); return; }
-  if (action === "pdf") { const f = await pickFile(PDF_FILTERS); if (f) await openSubPdf(f); }
-  else if (action === "doc") { const f = await pickFile(DOC_FILTERS); if (f) await openSubDoc(f); }
+  if (action === "close") { await closeAllSubTabs(); return; }
+  if (action === "computer") {
+    warmPdfPrepare();
+    const f = await pickFile(SUBVIEW_FILTERS);
+    if (f) await openSubAny(f);
+  }
+  else if (action === "drive") await openDriveDialog("sub");
   else if (action === "blank") await openSubDoc({ name: "새 문서.hwpx", path: null, bytes: await blankBytes() });
 }
-// 그림이 든 문서화 HTML만 단계로 나눈다. 글만 있을 때는 HTML 전체를 한 번에 넣어 빠르게 처리한다.
+// 그림이나 쪽 나누기가 든 문서화 HTML만 단계로 나눈다. 글만 있을 때는 HTML 전체를 한 번에 넣어 빠르게 처리한다.
 function pdfSteps(html) {
   const parsed = new DOMParser().parseFromString(String(html || ""), "text/html");
   const root = parsed.body.children.length === 1 && parsed.body.firstElementChild?.tagName === "DIV" ? parsed.body.firstElementChild : parsed.body;
   const steps = [{ kind: "fresh" }]; let images = 0, freshParagraph = true, pending = [];   // 새 문단에서 시작
+  // 목록 항목(문서화가 data-og-list 를 단 문단)은 따로 한 덩어리로 넣고, 편집기가 그 문단들에 진짜 글머리표·문단 번호를 건다.
+  // htmlMarked: 기호 글자를 되살린 HTML(표 칸 안처럼 목록 모양을 걸 수 없을 때)
+  const isList = (node) => node.matches("p[data-og-list]");
   const flush = () => {
     if (!pending.length) return;
     const wrapper = parsed.createElement("div");
@@ -173,10 +310,19 @@ function pdfSteps(html) {
     const chunkHtml = wrapper.innerHTML;
     const chunkText = pending.map((node) => node.textContent || "").join("\n");
     if (!freshParagraph) steps.push({ kind: "break" });
-    steps.push({ kind: "text", text: chunkText, html: chunkHtml });
+    const step = { kind: "text", text: chunkText, html: chunkHtml };
+    if (isList(pending[0])) {
+      step.list = pending.map((n) => ({ type: n.dataset.ogList, mark: n.dataset.ogMark || "", fmt: n.dataset.ogFmt || "", code: +(n.dataset.ogCode || 0), start: n.dataset.ogStart != null ? +n.dataset.ogStart : null }));
+      const marked = parsed.createElement("div");
+      for (const n of pending) { const c = n.cloneNode(true); c.textContent = (n.dataset.ogMarker ? n.dataset.ogMarker + " " : "") + n.textContent; marked.appendChild(c); }
+      step.htmlMarked = marked.innerHTML;
+    }
+    steps.push(step);
     freshParagraph = false; pending = [];
   };
   for (const node of root.children) {
+    // 원본에서 일부러 쪽을 넘긴 자리 → 쪽 나누기(그 뒤는 새 쪽의 빈 문단에서 이어 쓴다)
+    if (node.matches("hr[data-og-page-break]")) { flush(); if (steps.length > 1) { steps.push({ kind: "pagebreak" }); freshParagraph = true; } continue; }
     const img = node.matches("p") ? node.querySelector(":scope > img:only-child") : null;
     const m = img?.getAttribute("src")?.match(/^data:([^;]+);base64,(.+)$/i);
     if (m) {
@@ -185,12 +331,16 @@ function pdfSteps(html) {
       const ext = (m[1].split("/")[1] || "png").replace("jpeg", "jpg");
       // 글자 뒤라면 먼저 새 문단으로 이동한다. 빈 문단을 하나 더 만든 뒤 위쪽에 그림을 넣어
       // 그림 뒤에 항상 이어 쓸 문단을 남긴다.
-      if (!freshParagraph) steps.push({ kind: "break" });
+      // 내용이 그림으로 시작하면 한 문단 더 내려가서 넣는다: 빈 문서의 첫 문단에는 구역·용지 설정이 함께 들어 있어,
+      // 그림이 그 문단에 들어가면 전체 선택 후 삭제해도 편집기가 첫 문단의 개체와 함께 그림을 남겼다(두 번 지워야 했다).
+      if (!freshParagraph || steps.length === 1) steps.push({ kind: "break" });
       steps.push({ kind: "break" }, { kind: "up" });
-      steps.push({ kind: "image", mime: m[1], b64: m[2], name: `pdf-image-${images}.${ext}` });
+      // wPt·hPt: PDF 에 그려진 크기(pt) — 편집기에 같은 크기로 넣는다
+      steps.push({ kind: "image", mime: m[1], b64: m[2], name: `pdf-image-${images}.${ext}`, wPt: +img.getAttribute("width") || 0, hPt: +img.getAttribute("height") || 0 });
       freshParagraph = true;
       continue;
     }
+    if (pending.length && isList(pending[0]) !== isList(node)) flush();   // 목록 / 보통 문단이 바뀌는 곳에서 덩어리를 나눈다
     pending.push(node);
   }
   flush();
@@ -223,26 +373,32 @@ async function waitDocChange(before) {
 }
 
 async function insertPdfContent(source, data) {
-  if (sub.kind !== "pdf" || String(data.id) !== String(sub.viewerId)) return;
+  if (!subTabs.some((tab) => tab.kind === "pdf" && String(data.id) === String(tab.viewerId))) return;
   const reply = (ok, error = "") => source?.postMessage({ type: "ogolgye:documentized", ok, error }, location.origin);
   const fail = (err) => { status("문서화에 실패했습니다."); reply(false, String(err?.message || err)); };
   const text = String(data.text || "");
   if (!text) { reply(false, "가져올 본문이 없습니다."); return; }
   status("PDF 내용을 문서에 넣고 있습니다…");
   // 그림은 편집기의 파일 붙여넣기 경로가 필요하다. 글만 있으면 전체 HTML을 한 번에 넣는다.
-  if (/<img\b/i.test(String(data.html || ""))) {
+  if (/<img\b|data-og-page-break|data-og-list/i.test(String(data.html || ""))) {
     try {
       const { steps, images } = pdfSteps(String(data.html));
+      // 한 번에 넣기(편집기 작업 하나, 화면은 마지막에 한 번만 그림). 커서가 표 칸 안이면 단계별로.
+      const batch = await askEditor({ type: "ogolgye:paste-batch", steps }, "ogolgye:paste-result", 180000, "편집기가 응답하지 않습니다.");
+      if (batch.handled) {
+        setDirty(main, true);
+        const miss = images - (batch.placed ?? images);
+        status(`${data.pages?.length || "선택한"}쪽의 내용을 문서에 넣었습니다.` + (miss ? ` (그림 ${miss}개는 넣지 못했습니다)` : ""));
+        reply(true);
+        return;
+      }
+      if (batch.batch) throw new Error(batch.error || "편집기에 내용을 넣지 못했습니다.");
       let placed = 0;
       for (const st of steps) {
-        const before = st.kind === "image" ? await docSignature() : null;
         const r = await sendPasteStep(st);
+        // 그림 하나를 넣지 못해도(손상된 그림 등) 나머지 내용은 계속 넣는다
+        if (st.kind === "image") { if (r.handled) placed++; continue; }
         if (!r.handled) throw new Error(r.error || "편집기에 내용을 넣지 못했습니다.");
-        if (st.kind === "image" && await waitDocChange(before)) {
-          placed++;
-          // 넣은 그림을 "글자처럼 취급"으로 바꾼다(실패해도 그림은 남는다)
-          await sendPasteStep({ kind: "inline" }).catch(() => null);
-        }
       }
       // 모든 글·그림 삽입이 끝난 상태에서 페이지 수와 커서 좌표를 한 번에 다시 맞춘다.
       const refreshed = await sendPasteStep({ kind: "refresh" });
@@ -600,8 +756,10 @@ async function hwpxFromModelBytes(model, pageless) {
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "한글 문서를 만들지 못했습니다.");
   return new Uint8Array(await r.arrayBuffer());
 }
-const DRIVE_KIND = { folder: ["폴더", "📁"], gdoc: ["Google 문서", "📝"], docx: ["Word", "📘"], pdf: ["PDF", "📕"], hwp: ["한글", "📄"] };
-const drive = { el: null, stack: [], shared: false, query: "", files: [], selected: null, busy: false };
+const DRIVE_KIND = { folder: ["폴더", "📁"], gdoc: ["Google 문서", "📝"], docx: ["Word", "📘"], pdf: ["PDF", "📕"], hwp: ["한글", "📄"], gexport: ["Google 시트·슬라이드", "📊"], file: ["문서", "📃"] };
+const driveLabel = (f) => f.kind === "file" ? [(String(f.name).match(/\.([a-z0-9]+)$/i)?.[1] || "문서").toUpperCase(), DRIVE_KIND.file[1]] : DRIVE_KIND[f.kind] || ["", ""];
+// cache: 한 번 본 폴더 목록(바로 보여 주고 뒤에서 새로 받는다), prefetch: 고른 파일을 미리 받는 약속(열기를 누르면 이어 쓴다)
+const drive = { el: null, stack: [], shared: false, query: "", files: [], selected: null, busy: false, forcedTarget: null, cache: new Map(), prefetch: new Map() };
 function driveEl() {
   if (drive.el) return drive.el;
   const el = document.createElement("div");
@@ -632,6 +790,7 @@ function driveEl() {
     drive.selected = drive.files[+row.dataset.i];
     el.querySelectorAll(".dv-row").forEach((r) => r.classList.toggle("sel", r === row));
     q("[data-dv=open]").disabled = drive.selected.kind === "folder";
+    drivePrefetch(drive.selected);                                // 고르는 순간 받기 시작(열기를 누를 때는 이미 받는 중이거나 끝남)
   });
   q(".dv-list").addEventListener("dblclick", (e) => {
     const row = e.target.closest(".dv-row"); if (!row) return;
@@ -642,16 +801,36 @@ function driveEl() {
   drive.el = el;
   return el;
 }
-function closeDrive() { if (drive.el) drive.el.hidden = true; }
-async function openDriveDialog() {
-  if (!native?.google) { alert("Google 드라이브에서 열기는 데스크톱 앱에서 사용할 수 있습니다."); return; }
-  const st = await native.google.status();
-  if (!st.ok || !st.connected) { alert("먼저 도구 → 환경 설정 → Google 드라이브 연결에서 연결해 주세요."); return; }
-  if (!st.canBrowse) { alert("드라이브에서 가져오려면 읽기 권한이 필요합니다. 도구 → 환경 설정 → Google 드라이브 연결에서 \"연결하기\"를 한 번 더 눌러 주세요."); return; }
+function closeDrive() { if (drive.el) drive.el.hidden = true; drive.forcedTarget = null; }
+// PDF 를 열 것 같으면(파일 고르기·드라이브 창) 서버가 Kiwi(문단 띄어쓰기 판단)를 미리 불러오게 한다 — 고르는 동안 준비
+const warmPdfPrepare = () => { fetch("/api/prepare-warm", { method: "POST" }).catch(() => {}); };
+async function openDriveDialog(target = null) {
+  warmPdfPrepare();
   const el = driveEl();
+  const targetSelect = el.querySelector(".dv-target");
+  drive.forcedTarget = target === "sub" ? "sub" : null;
+  targetSelect.value = drive.forcedTarget || "main";
+  targetSelect.disabled = !!drive.forcedTarget;
   el.hidden = false;
+  const list = el.querySelector(".dv-list"), msg = el.querySelector(".dv-msg");
+  drive.selected = null; el.querySelector("[data-dv=open]").disabled = true;
+  list.innerHTML = '<div class="dv-empty">Google 드라이브 연결 상태를 확인하고 있습니다…</div>';
+  msg.textContent = "";
+  if (!native?.google) { list.innerHTML = '<div class="dv-empty">Google 드라이브에서 열기는 데스크톱 앱에서 사용할 수 있습니다.</div>'; return; }
+  native.google.warm?.().catch?.(() => {});                      // 연결 토큰을 미리(목록 요청과 겹쳐 기다림을 줄인다)
+  let st;
+  try { st = await native.google.status(); }
+  catch (err) { list.innerHTML = `<div class="dv-empty">연결 상태를 확인하지 못했습니다.<br>${escHtml(err?.message || err)}</div>`; return; }
+  if (!st?.ok || !st.connected) {
+    list.innerHTML = `<div class="dv-empty">${escHtml(st?.error || "먼저 도구 → 환경 설정 → Google 드라이브 연결에서 연결해 주세요.")}</div>`;
+    return;
+  }
+  if (!st.canBrowse) {
+    list.innerHTML = '<div class="dv-empty">드라이브에서 가져오려면 읽기 권한이 필요합니다.<br>도구 → 환경 설정 → Google 드라이브 연결에서 “연결하기”를 한 번 더 눌러 주세요.</div>';
+    return;
+  }
   if (!drive.stack.length) drive.stack = [{ id: "root", name: "내 드라이브" }];
-  loadDrive();
+  await loadDrive();
 }
 async function loadDrive() {
   const el = driveEl(), list = el.querySelector(".dv-list"), msg = el.querySelector(".dv-msg");
@@ -659,36 +838,79 @@ async function loadDrive() {
   const here = drive.stack.at(-1);
   el.querySelector(".dv-path").innerHTML = drive.query ? `"${escHtml(drive.query)}" 찾은 결과` :
     (drive.stack.length > 1 ? '<button data-dv="up" title="위로">↑</button> ' : "") + drive.stack.map((s) => escHtml(s.name)).join(" › ");
-  list.innerHTML = '<div class="dv-empty">불러오고 있습니다…</div>';
   const opt = drive.query ? { query: drive.query } : drive.shared && drive.stack.length === 1 ? { shared: true } : { folderId: here.id };
-  const r = await native.google.list(opt);
-  if (!r.ok) { list.innerHTML = `<div class="dv-empty">${escHtml(r.error)}</div>`; return; }
-  drive.files = r.files;
-  list.innerHTML = r.files.length ? r.files.map((f, i) => {
-    const [label, icon] = DRIVE_KIND[f.kind] || ["", ""];
-    return `<div class="dv-row" data-i="${i}"><span class="dv-ic">${icon}</span><span class="dv-name">${escHtml(f.name)}</span><span class="dv-kind">${label}</span><span class="dv-date">${f.modifiedTime ? new Date(f.modifiedTime).toLocaleDateString() : ""}</span></div>`;
-  }).join("") : '<div class="dv-empty">가져올 수 있는 파일이 없습니다. (Google 문서, Word, PDF, 한글 파일을 보여 줍니다)</div>';
-  msg.textContent = "";
+  const key = JSON.stringify(opt);
+  const show = (files) => {
+    const keep = drive.selected?.id;
+    drive.files = files;
+    list.innerHTML = files.length ? files.map((f, i) => {
+      const [label, icon] = driveLabel(f);
+      return `<div class="dv-row${f.id === keep ? " sel" : ""}" data-i="${i}"><span class="dv-ic">${icon}</span><span class="dv-name">${escHtml(f.name)}</span><span class="dv-kind">${escHtml(label)}</span><span class="dv-date">${f.modifiedTime ? new Date(f.modifiedTime).toLocaleDateString() : ""}</span></div>`;
+    }).join("") : '<div class="dv-empty">가져올 수 있는 파일이 없습니다. (Google 문서·시트·슬라이드, PDF, 한글, Word, ODT, RTF, 텍스트, Markdown, HTML, EPUB, CSV, Excel, PowerPoint 파일을 보여 줍니다)</div>';
+    drive.selected = files.find((f) => f.id === keep) || null;
+    el.querySelector("[data-dv=open]").disabled = !drive.selected || drive.selected.kind === "folder";
+  };
+  // 한 번 본 폴더는 바로 보여 주고(뒤에서 새 목록을 받아 바뀐 것만 다시 그린다), 처음이면 받는 동안 안내
+  const cached = drive.cache.get(key);
+  if (cached) { show(cached); msg.textContent = "새 목록을 확인하고 있습니다…"; }
+  else list.innerHTML = '<div class="dv-empty">불러오고 있습니다…</div>';
+  const token = (drive.loadToken = (drive.loadToken || 0) + 1);
+  try {
+    const r = await native.google.list(opt);
+    if (!r?.ok) throw new Error(r?.error || "Google 드라이브 목록을 불러오지 못했습니다.");
+    const files = Array.isArray(r.files) ? r.files : [];
+    drive.cache.set(key, files);
+    if (token !== drive.loadToken) return;                       // 그 사이 다른 폴더로 옮겼다
+    if (!cached || JSON.stringify(cached) !== JSON.stringify(files)) show(files);
+    msg.textContent = "";
+  } catch (err) {
+    if (token !== drive.loadToken) return;
+    if (cached) { msg.textContent = "새 목록을 받지 못해 전에 받은 목록을 보여 줍니다."; return; }
+    drive.files = [];
+    list.innerHTML = `<div class="dv-empty">Google 드라이브 목록을 불러오지 못했습니다.<br>${escHtml(err?.message || err)}</div>`;
+    msg.textContent = "연결 상태와 인터넷 연결을 확인해 주세요.";
+  }
+}
+// 고른 파일을 미리 받는다(같은 파일은 한 번만). 받은 결과는 열기에서 이어 쓰고, 오래된 것은 버린다(최근 3개)
+function drivePrefetch(f) {
+  if (!f || f.kind === "folder" || !native?.google) return null;
+  if (!drive.prefetch.has(f.id)) {
+    const p = native.google.fetch({ id: f.id, name: f.name, mimeType: f.mimeType, kind: f.kind });
+    p.catch(() => {});
+    drive.prefetch.set(f.id, p);
+    while (drive.prefetch.size > 3) drive.prefetch.delete(drive.prefetch.keys().next().value);
+  }
+  return drive.prefetch.get(f.id);
 }
 async function openDriveFile(f) {
   const el = driveEl(), msg = el.querySelector(".dv-msg");
-  const target = f.kind === "pdf" ? "sub" : el.querySelector(".dv-target").value;
+  const target = f.kind === "pdf" || f.kind === "gexport" ? "sub" : drive.forcedTarget || el.querySelector(".dv-target").value;
   if (target === "main" && main.dirty && !confirm("편집 화면에 저장하지 않은 내용이 있습니다. 가져온 문서로 바꿀까요?")) return;
   msg.textContent = "가져오고 있습니다…"; el.querySelectorAll("button").forEach((b) => (b.disabled = true));
   try {
-    const r = await native.google.fetch(f.id);
-    if (!r.ok) throw new Error(r.error);
+    // 목록에서 받은 이름·형식을 함께 넘겨 같은 메타데이터를 Google에 다시 묻는 왕복을 없앤다.
+    // 고를 때 이미 받기 시작했으면(drivePrefetch) 그 결과를 이어 쓴다. 실패한 미리 받기는 한 번 더 받는다.
+    let r = await drivePrefetch(f);
+    if (!r?.ok) { drive.prefetch.delete(f.id); r = await drivePrefetch(f); }
+    if (!r?.ok) throw new Error(r?.error || "파일을 받지 못했습니다.");
     let file;
     if (r.kind === "pdf") file = { name: /\.pdf$/i.test(r.name) ? r.name : r.name + ".pdf", path: null, bytes: new Uint8Array(r.bytes) };
     else if (r.kind === "hwp") file = { name: r.name, path: null, bytes: new Uint8Array(r.bytes) };
+    else if (r.kind === "file") {
+      // 그 밖의 문서(ODT·RTF·텍스트·Markdown·HTML·EPUB·CSV·Excel·PowerPoint): 받은 그대로 한글 문서로 바꾼다
+      msg.textContent = "한글 문서로 바꾸고 있습니다…";
+      const k = await hwpxOrOriginal({ name: r.name, path: null, bytes: new Uint8Array(r.bytes) });
+      file = k.pdf ? { name: r.name, path: null, bytes: new Uint8Array(r.bytes) } : k.file;
+    }
     else {
       msg.textContent = "한글 문서로 바꾸고 있습니다…";
       const model = { title: r.name, blocks: modelFromDocx(r.parts) };      // 한글 만들기는 { blocks } 모양을 받는다
       const bytes = await hwpxFromModelBytes(model, r.pageless);           // Google 문서: 그 문서의 보기 방식, Word: 기본 보기
       file = { name: r.name.replace(/\.docx$/i, "") + ".hwpx", path: null, bytes: new Uint8Array(bytes) };
     }
+    drive.prefetch.delete(f.id);
     closeDrive();
-    if (r.kind === "pdf") await openSubPdf(file);
+    if (r.kind === "pdf" || /\.pdf$/i.test(file.name)) await openSubPdf(file);
     else if (target === "sub") await openSubDoc(file);
     else { await main.editor.loadFile(file.bytes, file.name); Object.assign(main, { name: file.name, path: null }); setDirty(main, false); updateTitle(); }
     status(`${f.name}을(를) Google 드라이브에서 가져왔습니다.`);
@@ -724,8 +946,7 @@ async function exportDocument(format) {
 async function openDroppedSubview(raw) {
   if (!raw?.name || !raw.bytes) return;
   const file = { name: raw.name, path: raw.path || null, bytes: raw.bytes instanceof Uint8Array ? raw.bytes : new Uint8Array(raw.bytes) };
-  if (/\.pdf$/i.test(file.name)) await openSubPdf(file);
-  else if (/\.hwpx?$/i.test(file.name)) await openSubDoc(file);
+  await openSubAny(file);
 }
 addEventListener("message", (e) => {
   if (e.origin !== location.origin || !e.data) return;
@@ -742,11 +963,27 @@ addEventListener("message", (e) => {
   if (e.data.type === "ogolgye:ai") aiAction(e.source, e.data);
   if (e.data.type === "ogolgye:drive-open") openDriveDialog();
   if (e.data.type === "ogolgye:documentize") insertPdfContent(e.source, e.data);
-  if (e.data.type === "ogolgye:doc-name") { main.name = String(e.data.name || ""); updateTitle(); }
+  if (e.data.type === "ogolgye:doc-name") {
+    const name = String(e.data.name || ""), tab = subTabs.find((x) => x.editor?.element?.contentWindow === e.source);
+    if (tab) { tab.name = name; renderSubTabs(); }
+    else if (main.editor?.element?.contentWindow === e.source) { main.name = name; updateTitle(); }
+  }
   if (e.data.type === "ogolgye:image-dropped") { if (e.data.ok) { setDirty(main, true); status("그림을 문서에 넣었습니다."); } else status("그림을 넣지 못했습니다: " + e.data.error); }
   if (e.data.type === "ogolgye:subview-drop") openDroppedSubview(e.data.file);
 });
-$("#sub-close").onclick = closeSub;
+// 탭이 많아 탭 줄이 넘치면 세로 휠로 탭 줄을 가로로 민다(그대로 두면 아래의 PDF 가 스크롤됐다)
+subTabsElement.addEventListener("wheel", (e) => {
+  if (e.ctrlKey || subTabsElement.scrollWidth <= subTabsElement.clientWidth + 1) return;
+  e.preventDefault();
+  subTabsElement.scrollLeft += Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+}, { passive: false });
+subTabsElement.addEventListener("click", async (e) => {
+  const item = e.target.closest(".sub-tab"); if (!item) return;
+  const tab = subTabs.find((x) => x.id === item.dataset.tabId); if (!tab) return;
+  if (e.target.closest(".sub-tab-x")) await closeSub(tab);
+  else activateSub(tab);
+});
+subCloseElement.onclick = closeAllSubTabs;
 
 // 서브뷰에 파일 끌어다 놓기
 function bindDrop() {
@@ -776,7 +1013,7 @@ addEventListener("drop", async (e) => {
     const move = (ev) => {
       const r = work.getBoundingClientRect();
       const raw = subviewPosition === "left" ? ev.clientX - r.left : r.right - ev.clientX;
-      const w = Math.min(Math.max(raw, 260), r.width - 260);
+      const w = Math.round(Math.min(Math.max(raw, 260), r.width - 260));   // 정수 픽셀(소수점 폭이면 서브뷰 안이 번진다)
       $("#sub-pane").style.flexBasis = w + "px";
       notifyMainResize();
     };
@@ -788,13 +1025,13 @@ addEventListener("drop", async (e) => {
 // 브라우저 실행에서는 저장하지 않은 변경을 경고한다. Electron은 내부 Studio까지 이 이벤트를
 // 취소하면 창이 닫히지 않으므로 정상 종료를 우선하고, 저장 확인은 앱의 파일 흐름에서 맡는다.
 addEventListener("beforeunload", (e) => {
-  if (!native && (main.dirty || (sub.kind === "doc" && sub.dirty))) { e.preventDefault(); e.returnValue = ""; }
+  if (!native && (main.dirty || subTabs.some((tab) => tab.kind === "doc" && tab.dirty))) { e.preventDefault(); e.returnValue = ""; }
 });
 
 // ── 저장 안 한 변경 표시: 편집기에 주기적으로 묻는다
 setInterval(async () => {
-  for (const who of [main, sub]) {
-    if (!who.editor || (who === sub && sub.kind !== "doc")) continue;
+  for (const who of [main, ...subTabs]) {
+    if (!who.editor || (who !== main && who.kind !== "doc")) continue;
     try { const st = await who.editor.getDocumentState(); if (st && st.dirty !== who.dirty) setDirty(who, !!st.dirty); } catch { /* 불러오는 중 */ }
   }
 }, 1200);

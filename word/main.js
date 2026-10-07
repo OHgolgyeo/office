@@ -3,8 +3,8 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, shell, safeStorage } from "e
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { startServer, warmUp } from "./server.js";
-import { htmlArchive, pdfPrintHtml } from "./core/export-files.js";
+import { startServer, warmUp, shutdown } from "./server.js";
+import { htmlArchive, pdfPrintParts } from "./core/export-files.js";
 import { officeExport } from "./core/export-office.js";
 import { GoogleDocs } from "./core/google-docs.js";
 import { AiTools } from "./core/ai-tools.js";
@@ -17,10 +17,13 @@ const APP_ICON = path.join(__dirname, "assets", "icons", "word-folder-blue-to-sk
 let win;
 
 async function pdfFromSvgs(svgs) {
-  const html = pdfPrintHtml(svgs);
+  // 쪽 크기 스타일만 담은 작은 틀을 연 뒤 쪽 조각(SVG)을 하나씩 붙인다. 한 덩어리 HTML 을 data 주소로 열면
+  // 그림이 많은 문서(수 MB)에서 ERR_INVALID_URL 로 PDF 내보내기가 실패했다(파일로 열어도 5MB 쯤에서 실패).
+  const { shell, pages } = pdfPrintParts(svgs);
   const pdfWindow = new BrowserWindow({ show: false, webPreferences: { sandbox: true, contextIsolation: true } });
   try {
-    await pdfWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+    await pdfWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(shell));
+    for (const page of pages) await pdfWindow.webContents.executeJavaScript(`document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(page)}); 0`, true);
     await pdfWindow.webContents.executeJavaScript("document.fonts ? document.fonts.ready.then(()=>true) : true", true);
     return await pdfWindow.webContents.printToPDF({ printBackground: true, preferCSSPageSize: true, margins: { marginType: "none" } });
   } finally { if (!pdfWindow.isDestroyed()) pdfWindow.destroy(); }
@@ -28,7 +31,7 @@ async function pdfFromSvgs(svgs) {
 
 async function createWindow() {
   const { port } = await startServer(0);           // 빈 포트를 골라 127.0.0.1 에만 연다
-  warmUp();                                        // Kiwi 한국어 모델을 뒤에서 미리 불러 둔다
+  warmUp();                                        // PDF 준비 작업 스레드를 띄워 둔다(Kiwi 는 PDF 를 처음 준비할 때)
   win = new BrowserWindow({
     width: 1500, height: 950, title: "오골계 워드",
     icon: APP_ICON,
@@ -87,9 +90,11 @@ ipcMain.handle("google:connect", ipcCall(async () => googleDocs().connect()));
 ipcMain.handle("google:disconnect", ipcCall(async () => googleDocs().disconnect()));
 ipcMain.handle("google:send", ipcCall(async ({ model, title, pageless }) => googleDocs().send({ docx: officeExport("docx", model), title, pageless, tabs: model.tabs })));
 ipcMain.handle("google:list", ipcCall(async (opt) => googleDocs().list(opt)));
+ipcMain.handle("google:warm", ipcCall(async () => ({ warmed: await googleDocs().warm() })));
 // 드라이브 파일 가져오기: 한글·PDF 는 원본, Word 는 본문 부품으로, Google 문서는 Docs API 중간 구조로 바꾼다
-ipcMain.handle("google:fetch", ipcCall(async ({ id }) => {
-  const f = await googleDocs().fetchFile(id);
+ipcMain.handle("google:fetch", ipcCall(async ({ id, file }) => {
+  const selected = file && typeof file === "object" ? file : null;
+  const f = await googleDocs().fetchFile(selected?.id || id, selected);
   if (f.kind === "docx") return { kind: "docx", name: f.name, pageless: f.pageless, source: f.source, parts: docxParts(f.bytes) };
   if (f.kind === "model") return { kind: "hwp", name: f.name.replace(/\.hwpx$/i, "") + ".hwpx", bytes: new Uint8Array(await hwpxFromModel(f.model, { pageless: f.pageless })) };   // Google 문서(탭 포함) → 한글 문서
   return { kind: f.kind, name: f.name, bytes: new Uint8Array(f.bytes) };
@@ -148,5 +153,16 @@ function setupAutoUpdate() {
   setInterval(check, UPDATE_CHECK_MS);
 }
 
-app.whenReady().then(async () => { await createWindow(); setupAutoUpdate(); });
+app.whenReady().then(async () => {
+  await createWindow(); setupAutoUpdate();
+  // Google 드라이브에 연결해 두었으면 연결 토큰을 뒤에서 미리 받아 둔다(드라이브 창의 첫 목록이 토큰 갱신을 기다리지 않게)
+  setTimeout(() => { try { googleDocs().warm().catch(() => {}); } catch { /* 연결 안 함 */ } }, 4000);
+});
 app.on("window-all-closed", () => app.quit());
+// 끌 때 뒤에서 도는 계산(레이아웃 분석·문서화 준비·OCR)을 기다리지 않는다
+let shuttingDown = false;
+app.on("before-quit", (e) => {
+  if (shuttingDown) return;
+  shuttingDown = true; e.preventDefault();
+  Promise.race([shutdown(), new Promise((r) => setTimeout(r, 1500))]).finally(() => app.quit());
+});

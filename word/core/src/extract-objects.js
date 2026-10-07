@@ -44,8 +44,10 @@ function readString(M, fn, obj, idx) {
 export function readPageObjects(page) {
   const M = page.module, h = page.pageIdx;
   const W = M._FPDF_GetPageWidth(h), H = M._FPDF_GetPageHeight(h);
+  const origin = pageOrigin(page);                 // 보이는 영역 기준 좌표로
   const buf = M.wasmExports.malloc(64);
   const images = [], paths = [];
+  const textSeq = new Map();                       // 텍스트 개체 → 그려지는 순서(그림 밑에 가려진 글자 찾기용)
   let seq = 0;                                     // PDF에 그려지는 순서(겹침 순서 재현용)
   const walk = (count, get, parentM, depth) => {
     for (let i = 0; i < count; i++) {
@@ -56,13 +58,14 @@ export function readPageObjects(page) {
         walk(M._FPDFFormObj_CountObjects(obj), (k) => M._FPDFFormObj_GetObject(obj, k), fm, depth + 1);
         continue;
       }
+      if (type === OBJ.TEXT) { textSeq.set(obj, seq++); continue; }
       if (type !== OBJ.IMAGE && type !== OBJ.PATH) continue;
       let bbox;
       if (type === OBJ.IMAGE) {
         // 이미지 행렬은 단위 정사각형을 쪽 공간으로 옮긴다
         const m = mul(readMatrix(M, obj, buf), parentM);
         const pts = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([x, y]) => apply(m, x, y));
-        bbox = bboxOf(pts, H);
+        bbox = bboxOf(pts, origin);
         if (!M._FPDFImageObj_GetImagePixelSize(obj, buf, buf + 4)) continue;
         const pw = M.HEAPU32[buf >> 2], ph = M.HEAPU32[(buf >> 2) + 1];
         const nf = M._FPDFImageObj_GetImageFilterCount(obj);
@@ -74,8 +77,12 @@ export function readPageObjects(page) {
         const area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]);
         images.push({
           id: `p${page.number}-img${images.length}`, bbox, px: [pw, ph], filters, bpp, colorspace,
+          rawLen: M._FPDFImageObj_GetImageDataRaw(obj, 0, 0),   // 같은 그림(같은 데이터)이 여러 쪽에 쓰였는지 가리는 데 쓴다
           hasAlpha: M._FPDFPageObj_HasTransparency(obj) === 1,
           background: area > W * H * 0.5,       // 쪽 대부분을 덮는 배경 질감
+          // 기울여 놓은 그림(90° 단위 회전이 아닌 회전·비틀림): 원본을 꺼내면 가장자리가 잘려 보이는 그대로 그린다(reconstruct.js)
+          tilted: !((Math.abs(m[1]) < Math.abs(m[0]) * 0.01 && Math.abs(m[2]) < Math.abs(m[3]) * 0.01)
+            || (Math.abs(m[0]) < Math.abs(m[1]) * 0.01 && Math.abs(m[3]) < Math.abs(m[2]) * 0.01)),
           inForm: depth > 0, _obj: obj, _m: m, seq: seq++,
         });
       } else {
@@ -93,7 +100,7 @@ export function readPageObjects(page) {
         const pm = mul(readMatrix(M, obj, buf), parentM);
         const nseg = M._FPDFPath_CountSegments(obj);
         let d = "", pend = [];
-        const P = (x, y) => { const [X, Y] = apply(pm, x, y); return `${X.toFixed(2)} ${(H - Y).toFixed(2)}`; };
+        const P = (x, y) => { const [X, Y] = apply(pm, x, y); return `${(X - origin.x).toFixed(2)} ${(origin.top - Y).toFixed(2)}`; };
         for (let k = 0; k < nseg && k < 20000; k++) {
           const sg = M._FPDFPath_GetPathSegment(obj, k);
           M._FPDFPathSegment_GetPoint(sg, buf + 44, buf + 48);
@@ -105,7 +112,7 @@ export function readPageObjects(page) {
           if (M._FPDFPathSegment_GetClose(sg)) d += "Z";
         }
         const scale = Math.sqrt(Math.abs(pm[0] * pm[3] - pm[1] * pm[2])) || 1;
-        paths.push({ bbox: bboxOf(pts, H), segments: nseg, fill, stroke, strokeWidth: strokeWidth * scale,
+        paths.push({ bbox: bboxOf(pts, origin), segments: nseg, fill, stroke, strokeWidth: strokeWidth * scale,
           d, fillRule: fillMode === 1 ? "evenodd" : "nonzero", seq: seq++ });
       }
     }
@@ -113,12 +120,25 @@ export function readPageObjects(page) {
   try {
     walk(M._FPDFPage_CountObjects(h), (i) => M._FPDFPage_GetObject(h, i), [1, 0, 0, 1, 0, 0], 0);
   } finally { M.wasmExports.free(buf); }
-  return { images, paths };
+  return { images, paths, textSeq };
 }
 
-function bboxOf(pts, H) {
-  const xs = pts.map((p) => p[0]), ys = pts.map((p) => H - p[1]);
+function bboxOf(pts, origin) {
+  const xs = pts.map((p) => p[0] - origin.x), ys = pts.map((p) => origin.top - p[1]);
   return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+
+/** 쪽에서 실제로 보이는 영역(CropBox)의 왼쪽·위 — PDFium 은 개체·글자 좌표를 용지(MediaBox) 기준으로 준다.
+ *  펼침 표지처럼 용지는 넓고 보이는 곳은 일부인 쪽에서, 좌표를 보이는 영역 기준(왼쪽 위 0,0)으로 옮기는 데 쓴다. */
+export function pageOrigin(page) {
+  const M = page.module, h = page.pageIdx, buf = M.wasmExports.malloc(16);
+  try {
+    if (M._FPDFPage_GetCropBox(h, buf, buf + 4, buf + 8, buf + 12)) {
+      const f = M.HEAPF32, k = buf >> 2;
+      return { x: Math.min(f[k], f[k + 2]), top: Math.max(f[k + 1], f[k + 3]) };
+    }
+  } finally { M.wasmExports.free(buf); }
+  return { x: 0, top: M._FPDF_GetPageHeight(h) };
 }
 
 /**
@@ -156,9 +176,18 @@ function renderImage(doc, page, img) {
     // 원래 픽셀 크기로(단, 긴 변 최대 maxSide 픽셀 — 쪽 배경 질감처럼 거대한 이미지가 파일을 부풀리지 않게)
     const lim = Math.min(1, (img.maxSide || 2400) / Math.max(img.px[0], img.px[1]));
     const sx = Math.min((img.px[0] * lim) / cur, 8), sy = Math.min((img.px[1] * lim) / curH, 8);
+    // 그림에 걸린 잘라내기 경로(clip)는 원본을 꺼낼 때 무시한다: 뒤 사진 틀에 맞춰 잘리게 놓은 그림(전단 등)도 원본 전체를,
+    // 그리고 해상도를 올리려고 키운 그림이 원래 크기의 잘라내기 경로에 걸려 잘리지 않게. 그림 중심을 기준으로 아주 크게
+    // 늘렸다가(사실상 없앰) 끝나면 정확히 되돌린다.
+    const S = 1e4, cx = (a + c) / 2 + e, cy = (b + d) / 2 + f;
+    const clipped = !!M._FPDFPageObj_GetClipPath(obj);
     M._FPDFImageObj_SetMatrix(obj, a * sx, b * sx, c * sy, d * sy, e, f);
+    if (clipped) M._FPDFPageObj_TransformClipPath(obj, S, 0, 0, S, cx * (1 - S), cy * (1 - S));
     try { bmp = M._FPDFImageObj_GetRenderedBitmap(doc.documentIdx, page.pageIdx, obj); }
-    finally { M._FPDFImageObj_SetMatrix(obj, a, b, c, d, e, f); }
+    finally {
+      M._FPDFImageObj_SetMatrix(obj, a, b, c, d, e, f);
+      if (clipped) M._FPDFPageObj_TransformClipPath(obj, 1 / S, 0, 0, 1 / S, cx * (1 - 1 / S), cy * (1 - 1 / S));
+    }
     if (!bmp) return null;
     const w = M._FPDFBitmap_GetWidth(bmp), hgt = M._FPDFBitmap_GetHeight(bmp), stride = M._FPDFBitmap_GetStride(bmp);
     const fmt = M._FPDFBitmap_GetFormat(bmp);            // 1 회색, 2 BGR, 3 BGRx, 4 BGRA
@@ -185,14 +214,130 @@ function renderImage(doc, page, img) {
 }
 
 
-/** 쪽 하나를 바로 JPEG 로(보기 화면용, PNG 를 거치지 않아 빠르다) */
-export function renderPageJpeg(page, scale = 1.25, quality = 82) {
+/** 쪽의 한 부분(region, pt)을 가로 W × 세로 H 픽셀 그림으로 그린다(가로세로 배율이 달라도 된다).
+ *  반환: { data: Uint8Array(RGB, 한 점에 3바이트), w, h } — 표 인식 모델(core/ppstructure.js) 입력용 */
+export function renderRegionRGB(page, region, W, H) {
   const M = page.module, h = page.pageIdx;
-  const W = Math.round(M._FPDF_GetPageWidth(h) * scale), H = Math.round(M._FPDF_GetPageHeight(h) * scale);
+  const PW = M._FPDF_GetPageWidth(h), PH = M._FPDF_GetPageHeight(h);
+  const sx = W / Math.max(1e-3, region[2] - region[0]), sy = H / Math.max(1e-3, region[3] - region[1]);
   const bmp = M._FPDFBitmap_Create(W, H, 1);
   try {
     M._FPDFBitmap_FillRect(bmp, 0, 0, W, H, 0xffffffff);
-    M._FPDF_RenderPageBitmap(bmp, h, 0, 0, W, H, 0, 0x01);
+    M._FPDF_RenderPageBitmap(bmp, h, -Math.round(region[0] * sx), -Math.round(region[1] * sy), Math.round(PW * sx), Math.round(PH * sy), 0, 0);
+    const stride = M._FPDFBitmap_GetStride(bmp), base = M._FPDFBitmap_GetBuffer(bmp);
+    const out = new Uint8Array(W * H * 3);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const s = base + y * stride + x * 4, t = (y * W + x) * 3;
+      out[t] = M.HEAPU8[s + 2]; out[t + 1] = M.HEAPU8[s + 1]; out[t + 2] = M.HEAPU8[s];   // BGRA → RGB
+    }
+    return { data: out, w: W, h: H };
+  } finally { M._FPDFBitmap_Destroy(bmp); }
+}
+
+/** 쪽의 한 부분(pt)을 보이는 그대로 작게 그려 평균 색(#rrggbb)을 구한다. 글상자 바탕색에 쓴다.
+ *  글자는 바탕보다 적으므로, 밝기가 중간값에서 크게 벗어난 점(글자·테두리)은 빼고 평균한다. */
+export function regionAverageColor(page, region) {
+  const M = page.module, h = page.pageIdx;
+  const PW = M._FPDF_GetPageWidth(h), PH = M._FPDF_GetPageHeight(h);
+  const scale = Math.min(1, 64 / Math.max(1, region[2] - region[0], region[3] - region[1]));
+  const W = Math.max(1, Math.round((region[2] - region[0]) * scale)), H = Math.max(1, Math.round((region[3] - region[1]) * scale));
+  const bmp = M._FPDFBitmap_Create(W, H, 1);
+  try {
+    M._FPDFBitmap_FillRect(bmp, 0, 0, W, H, 0xffffffff);
+    M._FPDF_RenderPageBitmap(bmp, h, -Math.round(region[0] * scale), -Math.round(region[1] * scale), Math.round(PW * scale), Math.round(PH * scale), 0, 0);
+    const stride = M._FPDFBitmap_GetStride(bmp), base = M._FPDFBitmap_GetBuffer(bmp), px = [];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const s = base + y * stride + x * 4; px.push([M.HEAPU8[s + 2], M.HEAPU8[s + 1], M.HEAPU8[s]]); }
+    const lum = (c) => c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11;
+    const mid = px.map(lum).sort((a, b) => a - b)[px.length >> 1];
+    const keep = px.filter((c) => Math.abs(lum(c) - mid) < 40);
+    const avg = [0, 1, 2].map((k) => Math.round(keep.reduce((s, c) => s + c[k], 0) / Math.max(1, keep.length)));
+    return "#" + avg.map((v) => v.toString(16).padStart(2, "0")).join("");
+  } finally { M._FPDFBitmap_Destroy(bmp); }
+}
+
+/** 영역에서 가장 많이 보이는 색(글 밑에 깔린 종이 색). 글자 획은 적은 쪽이라 빠진다.
+ *  가운데 밝기 색(regionAverageColor)은 장식 테두리·글 양에 따라 같은 모양의 카드도 회색·흰색으로 갈렸다. */
+export function regionBackgroundColor(page, region) {
+  const M = page.module, h = page.pageIdx;
+  const PW = M._FPDF_GetPageWidth(h), PH = M._FPDF_GetPageHeight(h);
+  const scale = Math.min(2, 160 / Math.max(1, region[2] - region[0], region[3] - region[1]));
+  const W = Math.max(1, Math.round((region[2] - region[0]) * scale)), H = Math.max(1, Math.round((region[3] - region[1]) * scale));
+  const bmp = M._FPDFBitmap_Create(W, H, 1);
+  try {
+    M._FPDFBitmap_FillRect(bmp, 0, 0, W, H, 0xffffffff);
+    M._FPDF_RenderPageBitmap(bmp, h, -Math.round(region[0] * scale), -Math.round(region[1] * scale), Math.round(PW * scale), Math.round(PH * scale), 0, 0);
+    const stride = M._FPDFBitmap_GetStride(bmp), base = M._FPDFBitmap_GetBuffer(bmp);
+    const bins = new Map();                                   // 채널마다 16단계로 묶어 센다(종이 질감의 작은 얼룩은 한 칸에)
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const s = base + y * stride + x * 4, r = M.HEAPU8[s + 2], g = M.HEAPU8[s + 1], b = M.HEAPU8[s];
+      const k = (r >> 4) << 8 | (g >> 4) << 4 | (b >> 4);
+      const e = bins.get(k) || bins.set(k, [0, 0, 0, 0]).get(k);
+      e[0]++; e[1] += r; e[2] += g; e[3] += b;
+    }
+    let best = null;
+    for (const e of bins.values()) if (!best || e[0] > best[0]) best = e;
+    return "#" + [1, 2, 3].map((k) => Math.round(best[k] / best[0]).toString(16).padStart(2, "0")).join("");
+  } finally { M._FPDFBitmap_Destroy(bmp); }
+}
+
+/** fn 을 부르는 동안 글자 번호(hide, 텍스트 쪽의 char index)가 든 텍스트 개체를 보이지 않게(그리기 방식 3) 해 둔다 */
+export function withHiddenText(page, hide, fn) {
+  if (!hide || !hide.length) return fn();
+  const M = page.module, restore = [], tp = M._FPDFText_LoadPage(page.pageIdx), objs = new Set();
+  try {
+    for (const ci of hide) { const o = M._FPDFText_GetTextObject(tp, ci); if (o) objs.add(o); }
+    for (const o of objs) { restore.push([o, M._FPDFTextObj_GetTextRenderMode(o)]); M._FPDFTextObj_SetTextRenderMode(o, 3); }
+    return fn();
+  } finally {
+    for (const [o, m] of restore) M._FPDFTextObj_SetTextRenderMode(o, m);
+    M._FPDFText_ClosePage(tp);
+  }
+}
+
+/** fn 을 부르는 동안 keepIds(readPageObjects 의 그림 id) 그림만 남기고 쪽의 다른 개체(글자·선·다른 그림)를
+ *  쪽 밖으로 잠시 옮겨 둔다. 겹쳐 저장된 한 장식(띠 + 촉수 그림)을 종이 배경·글자 없이 한 장으로 그릴 때 쓴다.
+ *  keepText 면 글자·선은 그대로 두고 다른 그림만 옮긴다(손글씨 쪽지처럼 그림 위 글씨까지 그려야 할 때). */
+export function withOnlyImages(page, keepIds, fn, { keepText = false } = {}) {
+  const M = page.module, h = page.pageIdx, keep = new Set(keepIds);
+  const D = 10 * Math.max(M._FPDF_GetPageWidth(h), M._FPDF_GetPageHeight(h));
+  const moved = [];
+  let imageNo = 0;
+  const walk = (count, get) => {
+    for (let i = 0; i < count; i++) {
+      const obj = get(i), type = M._FPDFPageObj_GetType(obj);
+      if (type === OBJ.FORM) { walk(M._FPDFFormObj_CountObjects(obj), (k) => M._FPDFFormObj_GetObject(obj, k)); continue; }
+      // 그림 번호는 readPageObjects 와 같은 순서(그림 크기를 못 읽는 그림도 번호를 건너뛰지 않게 같은 조건으로)
+      if (type === OBJ.IMAGE) {
+        const buf = M.wasmExports.malloc(8);
+        let counted = false;
+        try { counted = !!M._FPDFImageObj_GetImagePixelSize(obj, buf, buf + 4); } finally { M.wasmExports.free(buf); }
+        const id = counted ? `p${page.number}-img${imageNo++}` : null;
+        if (id && keep.has(id)) continue;
+      } else if (keepText || (type !== OBJ.TEXT && type !== OBJ.PATH)) continue;
+      M._FPDFPageObj_Transform(obj, 1, 0, 0, 1, D, 0);
+      moved.push(obj);
+    }
+  };
+  try {
+    walk(M._FPDFPage_CountObjects(h), (i) => M._FPDFPage_GetObject(h, i));
+    return fn();
+  } finally {
+    for (const obj of moved) M._FPDFPageObj_Transform(obj, 1, 0, 0, 1, -D, 0);
+  }
+}
+
+/** 쪽 하나를 바로 JPEG 로(보기 화면용, PNG 를 거치지 않아 빠르다).
+ *  region([x0,y0,x1,y1] pt)을 주면 쪽에서 그 부분만 보이는 그대로(그림 위 글자·선 포함) 그린다. */
+export function renderPageJpeg(page, scale = 1.25, quality = 82, region = null) {
+  const M = page.module, h = page.pageIdx;
+  const PW = M._FPDF_GetPageWidth(h), PH = M._FPDF_GetPageHeight(h);
+  const [rx0, ry0, rx1, ry1] = region || [0, 0, PW, PH];
+  const W = Math.max(1, Math.round((rx1 - rx0) * scale)), H = Math.max(1, Math.round((ry1 - ry0) * scale));
+  const bmp = M._FPDFBitmap_Create(W, H, 1);
+  try {
+    M._FPDFBitmap_FillRect(bmp, 0, 0, W, H, 0xffffffff);
+    // 쪽 전체를 scale 로 그리되 region 의 왼쪽 위가 비트맵 (0,0)에 오도록 옮긴다(비트맵 밖은 잘린다)
+    M._FPDF_RenderPageBitmap(bmp, h, -Math.round(rx0 * scale), -Math.round(ry0 * scale), Math.round(PW * scale), Math.round(PH * scale), 0, 0x01);
     const stride = M._FPDFBitmap_GetStride(bmp), base = M._FPDFBitmap_GetBuffer(bmp);
     // PDFium 은 BGRA 로 그린다
     const bgra = Buffer.alloc(W * H * 4);

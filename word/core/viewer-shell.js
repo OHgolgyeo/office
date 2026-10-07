@@ -10,7 +10,7 @@ export function buildShellHtml(id, meta) {
 <style>
 :root{--og-accent:#6b7b3a;--og-soft:color-mix(in srgb,var(--og-accent) 12%,#fff)}
 body{margin:0;background:#f4f5f2;font-family:system-ui,sans-serif}
-.menu{position:sticky;top:0;z-index:110;display:flex;gap:8px;align-items:center;padding:6px 12px;background:#fff;color:#333;font-size:13px;border-bottom:1px solid #e6e7e3;overflow-x:auto}
+.menu{position:sticky;top:0;z-index:110;display:flex;gap:8px;align-items:center;padding:6px 12px;background:#fff;color:#333;font-size:13px;border-bottom:1px solid #e6e7e3;flex-wrap:wrap;row-gap:4px}
 .menu b{margin-right:4px}
 .menu button{white-space:nowrap;background:#fff;color:#333;border:1px solid #d4d6d0;border-radius:6px;padding:4px 12px;font-size:13px;cursor:pointer}
 .menu button:hover:not(:disabled){background:var(--og-soft);border-color:var(--og-accent)}
@@ -45,6 +45,9 @@ input[type=checkbox]:checked::after{content:"";width:7px;height:3.5px;border:2px
 .docmenu button:hover{background:var(--og-soft)}
 .doccheck{display:flex!important;align-items:center;gap:7px;padding:7px 13px;white-space:nowrap;cursor:pointer;border-bottom:1px solid #e6e7e3}
 .doccheck input{margin:0}
+.docrules{min-width:220px}
+.rulecheck{display:flex;align-items:center;gap:7px;padding:7px 13px;white-space:nowrap;cursor:pointer}
+.rulecheck:hover{background:var(--og-soft)}
 .pg{margin:14px auto;width:max-content;transform-origin:top left}
 .sheet{position:relative;width:var(--w);height:var(--h);background:#fff;box-shadow:0 0 0 1px #e6e7e3;overflow:hidden}
 .bg{position:absolute;inset:0;z-index:1;width:100%;height:100%;user-select:none;-webkit-user-drag:none}
@@ -91,11 +94,30 @@ body.note-mode .sheet{cursor:crosshair}body.hl-mode .tlayer{cursor:text}.ann-hel
 .ogdlg-actions{display:flex;justify-content:flex-end;gap:6px;margin-top:8px}
 .ogbtn{height:30px;padding:0 14px;border:0;border-radius:7px;font:13px system-ui,sans-serif;cursor:pointer;background:#f0f1ed;color:#333}.ogbtn:hover{background:#e6e8e2}
 .ogbtn.primary{background:var(--og-accent);color:#fff}.ogbtn.primary:hover{filter:brightness(1.08)}
+.imgdlg .imgdlg-card{width:min(760px,calc(100vw - 32px));max-height:calc(100vh - 64px);display:flex;flex-direction:column;background:#fff;border-radius:12px;box-shadow:0 10px 32px rgba(0,0,0,.22);overflow:hidden}
+.imgdlg-head{display:flex;align-items:center;gap:10px;padding:14px 16px 6px}.imgdlg-head h3{margin:0;font-size:15px;flex:1}
+.imgdlg-head button{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:0;border-radius:6px;background:transparent;color:#666;font-size:18px;cursor:pointer}.imgdlg-head button:hover{background:var(--og-soft);color:#000}
+.imgdlg-help{padding:0 16px 10px;font-size:12.5px;color:#777;border-bottom:1px solid #e6e7e3}
+.imgdlg-grid{flex:1;overflow:auto;padding:12px 16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;align-content:start}
+.imgtile{position:relative;display:flex;flex-direction:column;gap:5px}.imgtile[hidden]{display:none}
+.imgpic{height:130px;border:1px solid #dcdeda;border-radius:7px;background:#fff repeating-conic-gradient(#f1f2ef 0 25%,#fff 0 50%) 0 0/16px 16px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.imgpic img{max-width:100%;max-height:100%;object-fit:contain}
+.imgcap{font-size:12px;color:#555;text-align:center}
+.imgdel{position:absolute;top:5px;right:5px;width:26px;height:26px;border:0;border-radius:50%;background:rgba(46,48,43,.72);color:#fff;font-size:14px;display:flex;align-items:center;justify-content:center;cursor:pointer}.imgdel:hover{background:#b00020}
+.imgdlg-foot{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid #e6e7e3}.imgdlg-foot .grow{flex:1;font-size:12.5px;color:#555}
+.imgdlg-foot .linkbtn{border:0;background:transparent;color:var(--og-accent);font:12.5px system-ui,sans-serif;cursor:pointer;padding:0 6px}.imgdlg-foot .linkbtn[hidden]{display:none}
+.ogbtn:disabled{opacity:.5;cursor:default}
 .toast{position:fixed;left:50%;bottom:24px;z-index:150;transform:translate(-50%,12px);max-width:calc(100vw - 32px);padding:9px 16px;border-radius:9px;background:#2e302b;color:#fff;font-size:13px;white-space:pre-line;box-shadow:0 6px 20px rgba(0,0,0,.22);opacity:0;pointer-events:none;transition:opacity .18s,transform .18s}
 .toast.show{opacity:1;transform:translate(-50%,0)}
+/* 지금 하는 일(문서화 진행): 오른쪽 아래 떠 있는 창 — 그림 글자 읽기 안내(.ocr-wait)와 같은 모양, 배경만 불투명. 위 메뉴가 길어지지 않게 */
+.busy{position:fixed;right:16px;bottom:16px;z-index:140;display:none;max-width:calc(100vw - 32px);padding:4px 10px;border-radius:12px;background:#2e302b;color:#fff;font-size:12px;pointer-events:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.busy.show{display:block}
+
 .tlayer .tl{user-select:text;-webkit-user-select:text}
 .figgrab{position:absolute;cursor:grab;border-radius:2px}
 .figgrab:hover{outline:2px dashed var(--og-accent);outline-offset:-2px;background:color-mix(in srgb,var(--og-accent) 7%,transparent)}
+/* 글자를 드래그하는 동안에는 그림 잡기 영역이 반응하지 않는다(그림 속 글자를 끌다가 글자 없는 곳에 닿으면 그림 선택 표시가 떴다) */
+body.selecting .figgrab{pointer-events:none}
 .tl{position:absolute;white-space:pre;color:transparent;transform-origin:0 0;line-height:1}
 .tl::selection{background:rgba(0,100,255,.25);color:transparent}
 .loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#999;font-size:14px;z-index:0}
@@ -123,11 +145,16 @@ body.thumbs-open .thumbs{display:flex}
 <body>
 <div class="menu"><b>PDF</b>
   <div class="docbox" id="docbox"><button id="docbtn" disabled>문서화 ▾</button><div class="docmenu">
-    <div class="docitem">전체 변환 <span class="docarrow">▶</span><div class="docsub"><button data-all data-images="0">글</button><button data-all data-images="1">글+이미지</button></div></div>
+    <div class="docitem">전체 변환 <span class="docarrow">▶</span><div class="docsub"><button data-all data-rules="0">글</button><button data-all data-rules="1">규칙 적용</button></div></div>
     <div class="docitem">부분 변환 <span class="docarrow">▶</span><div class="docsub">
-      <label class="doccheck"><input type="checkbox" id="partial-images"> 이미지 포함</label>
+      <label class="doccheck"><input type="checkbox" id="partial-rules"> 규칙 적용</label>
       <button data-partial="even">짝수 페이지</button><button data-partial="odd">홀수 페이지</button><button data-partial="range">페이지 지정…</button><button data-partial="current">보고 있는 페이지</button>
     </div></div>
+    <div class="docitem">문서화 규칙 <span class="docarrow">▶</span><div class="docsub docrules">
+      <label class="rulecheck"><input type="checkbox" data-rule="objectImages"> 오브젝트 이미지 가져오기</label>
+      <label class="rulecheck"><input type="checkbox" data-rule="tables"> 표 모양 그대로 살리기</label>
+      <label class="rulecheck"><input type="checkbox" data-rule="blankLines"> 문단 사이 빈 줄 살리기</label>
+      <label class="rulecheck" title="쪽의 짜임(레이아웃)을 분석하는 모델(컴퓨터 안에서 실행)로 선 없는 표·스캔본의 표를 찾고, 쪽마다 되풀이되는 머리말·꼬리말(장 제목·쪽 번호·장식 띠)을 뺍니다. 처음 켤 때 모델(약 131MB)을 한 번 내려받습니다"><input type="checkbox" data-rule="scanTables"> 레이아웃 분석 (선 없는 표·스캔본·머리말/꼬리말)</label>    </div></div>
   </div></div>
   <div class="pagenav">
     <button id="thumbs-btn" class="tool" title="쪽 목록"><i class="ph ph-squares-four"></i></button>
@@ -141,12 +168,20 @@ body.thumbs-open .thumbs{display:flex}
     <div class="hlbox"><button id="highlight" class="tool" title="형광펜 (글자를 드래그하면 칠합니다)"><i class="ph ph-pencil-simple-line"></i><span class="hlbar"></span></button><button id="hl-caret" class="tool caret" title="형광펜 색"><i class="ph ph-caret-down"></i></button></div>
     <button id="note" class="tool" title="메모 (PDF의 원하는 곳을 누르면 붙습니다)"><i class="ph ph-note"></i></button>
     <button id="ann-list-btn" class="tool" title="주석 목록"><i class="ph ph-list-checks"></i></button>
+    <button id="img-zip" class="tool" title="그림 내보내기 (목록에서 골라 ZIP으로 내려받기)"><i class="ph ph-images"></i></button>
   </div>
 </div>
 <div id="hl-pop" class="pop"><div class="swatches"></div></div>
 <aside id="ann-panel" class="ann-panel"><div class="ann-panel-head"><span>주석 목록</span><button id="ann-close" title="닫기"><i class="ph ph-x"></i></button></div><div class="ann-help">항목을 누르면 해당 위치로 이동합니다.</div><div id="ann-list" class="ann-list"></div></aside>
 <div id="ogdlg" class="ogdlg" hidden><div class="ogdlg-card" role="dialog" aria-modal="true"><h3 id="ogdlg-title"></h3><p id="ogdlg-desc"></p><input type="text" id="ogdlg-input"><div class="ogdlg-err" id="ogdlg-err"></div><div class="ogdlg-actions"><button class="ogbtn" id="ogdlg-cancel">취소</button><button class="ogbtn primary" id="ogdlg-ok">확인</button></div></div></div>
+<div id="imgdlg" class="ogdlg imgdlg" hidden><div class="imgdlg-card" role="dialog" aria-modal="true" aria-labelledby="imgdlg-title">
+  <div class="imgdlg-head"><h3 id="imgdlg-title">그림 내보내기</h3><button id="imgdlg-close" title="닫기"><i class="ph ph-x"></i></button></div>
+  <div class="imgdlg-help">필요 없는 그림은 ✕를 눌러 목록에서 빼세요. 목록에서만 빠지고 PDF에는 그대로 남습니다.</div>
+  <div class="imgdlg-grid" id="imgdlg-grid"></div>
+  <div class="imgdlg-foot"><span class="grow" id="imgdlg-count"></span><button class="linkbtn" id="imgdlg-restore" hidden></button><button class="ogbtn" id="imgdlg-cancel">취소</button><button class="ogbtn primary" id="imgdlg-ok">내려받기</button></div>
+</div></div>
 <div id="toast" class="toast"></div>
+<div id="busy" class="busy" role="status"></div>
 <aside id="thumbs" class="thumbs" aria-label="쪽 목록"><div class="thumbs-list" id="thumbs-list"></div></aside>
 ${pages}
 <div id="ctx" class="ctx"></div>
@@ -157,7 +192,78 @@ const annPanel=document.getElementById('ann-panel'),annList=document.getElementB
 const annId=()=>Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,9);
 // 앱 디자인의 알림·입력 창(브라우저 기본 창 대신)
 const toastEl=document.getElementById('toast');
+const busyEl=document.getElementById('busy');
+function busy(msg){busyEl.textContent=msg||'';busyEl.classList.toggle('show',!!msg);}
 function toast(msg){toastEl.textContent=msg;toastEl.classList.add('show');clearTimeout(toast._t);toast._t=setTimeout(()=>toastEl.classList.remove('show'),2600);}
+// 그림 내보내기: 이 PDF의 그림(끌어서 넣을 수 있는 것과 같은 그림)을 목록으로 보여 주고, 필요 없는 그림은 목록에서만 빼고(PDF는 그대로)
+// 남은 그림을 ZIP 하나로 저장한다. 파일 이름은 빼기 전 번호 그대로("쪽2-그림01.jpg") — 뺀 그림 때문에 번호가 바뀌지 않는다.
+const imgDlg=document.getElementById('imgdlg'),imgGrid=document.getElementById('imgdlg-grid'),imgCount=document.getElementById('imgdlg-count'),imgOk=document.getElementById('imgdlg-ok'),imgRestore=document.getElementById('imgdlg-restore');
+let imgList=[],imgOut=new Set();
+const imgKey=f=>f.page+':'+f.id;
+function imgRender(){
+  const keep=imgList.filter(f=>!imgOut.has(imgKey(f)));
+  imgCount.textContent=imgList.length+'개 중 '+keep.length+'개를 내려받습니다';
+  imgOk.textContent='내려받기 ('+keep.length+'개)';imgOk.disabled=!keep.length;
+  imgRestore.hidden=!imgOut.size;imgRestore.textContent='뺀 그림 다시 넣기 ('+imgOut.size+'개)';
+  imgGrid.querySelectorAll('.imgtile').forEach(t=>{t.hidden=imgOut.has(t.dataset.key);});
+}
+function openImgDlg(){
+  // 쪽·위→아래·왼→오른 순서, 쪽마다 1부터(서버의 파일 이름과 같은 번호)
+  imgList=FIGS.slice().sort((a,b)=>a.page-b.page||a.bbox[1]-b.bbox[1]||a.bbox[0]-b.bbox[0]);
+  const per=new Map();imgOut=new Set();imgGrid.textContent='';
+  for(const f of imgList){
+    const k=(per.get(f.page)||0)+1;per.set(f.page,k);
+    const t=document.createElement('div');t.className='imgtile';t.dataset.key=imgKey(f);
+    const pic=document.createElement('div');pic.className='imgpic';
+    const im=document.createElement('img');im.loading='lazy';im.alt='';im.src='/pdf/'+ID+'/image/'+f.page+'/'+f.id;pic.appendChild(im);
+    const cap=document.createElement('div');cap.className='imgcap';cap.textContent=(f.page+1)+'쪽 · 그림 '+k;
+    const x=document.createElement('button');x.className='imgdel';x.title='목록에서 빼기 (PDF에는 그대로 남습니다)';x.innerHTML='<i class="ph ph-x"></i>';
+    x.onclick=()=>{imgOut.add(t.dataset.key);imgRender();};
+    t.append(pic,cap,x);imgGrid.appendChild(t);
+  }
+  imgRender();imgDlg.hidden=false;imgOk.focus();
+}
+function closeImgDlg(){imgDlg.hidden=true;imgGrid.textContent='';}
+document.getElementById('img-zip').addEventListener('click',()=>{
+  if(!ready){toast('아직 그림을 찾는 중입니다. 잠시 뒤 다시 눌러 주세요.');return;}
+  if(!FIGS.length){toast('이 PDF에는 꺼낼 그림이 없습니다.');return;}
+  openImgDlg();
+});
+document.getElementById('imgdlg-close').onclick=closeImgDlg;
+document.getElementById('imgdlg-cancel').onclick=closeImgDlg;
+imgRestore.onclick=()=>{imgOut.clear();imgRender();};
+imgDlg.addEventListener('mousedown',e=>{if(e.target===imgDlg)closeImgDlg();});
+imgDlg.addEventListener('keydown',e=>{if(e.key==='Escape'){e.stopPropagation();closeImgDlg();}});
+imgOk.onclick=async()=>{
+  const keep=imgList.filter(f=>!imgOut.has(imgKey(f))).map(imgKey);
+  if(!keep.length)return;
+  imgOk.disabled=true;toast('그림 '+keep.length+'개를 모으고 있습니다…');
+  try{
+    const r=await fetch('/pdf/'+ID+'/images.zip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:keep})});
+    if(!r.ok){let m='그림을 모으지 못했습니다.';try{m=(await r.json()).error||m;}catch{}toast(m);return;}
+    const cd=r.headers.get('Content-Disposition')||'',enc=cd.split("filename*=UTF-8''")[1];
+    const url=URL.createObjectURL(await r.blob()),a=document.createElement('a');
+    a.href=url;a.download=enc?decodeURIComponent(enc.split(';')[0]):'images.zip';document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),60000);
+    closeImgDlg();
+  }catch{toast('그림을 모으지 못했습니다.');}
+  finally{imgOk.disabled=false;}
+};
+// 떠 있는 창(대화상자·그림 목록·주석 목록) 위의 휠은 그 안에서만: 안쪽 목록이 그 방향으로 더 움직일 수 있을 때만 두고,
+// 아니면(넘치지 않거나 끝에 닿았거나 창 바깥 어두운 곳) 막는다 — 막지 않으면 뒤의 PDF 가 스크롤됐다
+function trapWheel(root){
+  root.addEventListener('wheel',e=>{
+    if(e.ctrlKey)return;
+    for(let el=e.target;el&&el!==root.parentNode;el=el.parentElement){
+      const cs=getComputedStyle(el);
+      if(e.deltaY&&el.scrollHeight>el.clientHeight+1&&/auto|scroll/.test(cs.overflowY)&&(e.deltaY<0?el.scrollTop>0:el.scrollTop+el.clientHeight<el.scrollHeight-1))return;
+      if(e.deltaX&&el.scrollWidth>el.clientWidth+1&&/auto|scroll/.test(cs.overflowX)&&(e.deltaX<0?el.scrollLeft>0:el.scrollLeft+el.clientWidth<el.scrollWidth-1))return;
+      if(el===root)break;
+    }
+    e.preventDefault();
+  },{passive:false});
+}
+document.querySelectorAll('.ogdlg,.ann-panel').forEach(trapWheel);
 const dlg=document.getElementById('ogdlg'),dlgInput=document.getElementById('ogdlg-input'),dlgErr=document.getElementById('ogdlg-err');
 function askText(title,desc,value,okLabel,check){return new Promise(done=>{
   document.getElementById('ogdlg-title').textContent=title;document.getElementById('ogdlg-desc').textContent=desc;document.getElementById('ogdlg-ok').textContent=okLabel||'확인';
@@ -199,7 +305,10 @@ function renderAnnotationList(){
   ANN.highlights.slice().sort((a,b)=>a.page-b.page).forEach(x=>rows.push({id:x.id,type:'highlight',page:x.page,y:x.rects[0]&&x.rects[0].y,html:annLabel('highlight','형광펜',x.page,x.text,' <span class="sw" style="background:'+(x.color||'#ffe066')+'"></span>')}));
   annList.innerHTML=rows.length?rows.map(x=>'<div class="ann-item" data-type="'+x.type+'" data-id="'+x.id+'" data-page="'+x.page+'" data-y="'+(x.y==null?'':x.y)+'">'+x.html+'<button class="ann-del" title="삭제"><i class="ph ph-trash"></i></button></div>').join(''):'<div class="ann-empty">아직 추가한 주석이 없습니다.</div>';
 }
-function saveAnnotations(){clearTimeout(annSaveTimer);annSaveTimer=setTimeout(()=>fetch('/pdf/'+ID+'/annotations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ANN)}).catch(()=>{}),180);}
+function postAnnotations(){annSaveTimer=0;return fetch('/pdf/'+ID+'/annotations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ANN)}).catch(()=>{});}
+function saveAnnotations(){clearTimeout(annSaveTimer);annSaveTimer=setTimeout(postAnnotations,180);}
+// 탭을 닫기 직전(app.js closeSub): 아직 안 보낸 주석이 있으면 바로 보낸다 — 닫힌 뒤엔 서버 세션이 없어진다
+window.ogFlushAnnotations=()=>{if(!annSaveTimer)return Promise.resolve();clearTimeout(annSaveTimer);return postAnnotations();};
 function changed(page){renderAnnotationsPage(page);renderAnnotationList();markBookmarkButton();saveAnnotations();}
 async function loadAnnotations(){try{const r=await fetch('/pdf/'+ID+'/annotations',{cache:'no-store'});if(r.ok)ANN=await r.json();}catch{}ANN.highlights||=[];ANN.bookmarks||=[];ANN.notes||=[];renderAnnotations();}
 const viewSheet=page=>document.querySelector('.pg[data-n="'+page+'"]>.sheet');
@@ -268,9 +377,9 @@ addEventListener('scroll',()=>{clearTimeout(markBookmarkButton._t);markBookmarkB
 addEventListener('message',e=>{
   if(e.origin!==location.origin||!e.data)return;
   if(e.data.type==='ogolgye:theme')document.documentElement.style.setProperty('--og-accent',e.data.color);
-  if(e.data.type==='ogolgye:ocr-updated')document.querySelectorAll('.pg[data-tl]').forEach(loadOcr);
+  if(e.data.type==='ogolgye:ocr-updated')document.querySelectorAll('.pg[data-tl]').forEach(s=>{s.dataset.ocr='';loadOcr(s);});   // 언어를 바꾸면 다시 읽는다
   if(e.data.type==='ogolgye:documentized'){
-    btn.disabled=false;btn.textContent='문서화 ▾';
+    btn.disabled=false;btn.textContent='문서화 ▾';busy('');
     if(!e.data.ok)toast('문서화하지 못했습니다.\\n'+(e.data.error||''));
   }
 });
@@ -279,9 +388,10 @@ let ready=false,OCR_PAGES=new Set();                    // 글자를 담을 만�
 async function poll(){
   try{
     const st=await (await fetch('/pdf/'+ID+'/status')).json();
-    if(st.error){btn.title='변환할 수 없습니다: '+st.error;return;}
+    if(st.error){btn.title='변환할 수 없습니다: '+st.error;busy('');return;}
+    if(!st.ready&&st.progress){btn.textContent='준비 중…';busy('문서화 준비 중… '+progressText(st.progress));}
     if(st.ready){
-      ready=true;btn.disabled=false;btn.textContent='문서화 ▾';OCR_PAGES=new Set(st.ocrPages||[]);
+      ready=true;btn.disabled=false;btn.textContent='문서화 ▾';busy('');OCR_PAGES=new Set(st.ocrPages||[]);
       try{FIGS=await (await fetch('/pdf/'+ID+'/figures')).json();}catch{FIGS=[];}
       visible.forEach(loadPage);return;
     }
@@ -293,6 +403,9 @@ let FIGS=[];
 function figHtml(n){return FIGS.filter(f=>f.page===+n).map(f=>'<div class="figgrab" draggable="true" data-page="'+f.page+'" data-img="'+f.id+'" title="끌어서 문서에 넣기" style="left:'+f.bbox[0]+'pt;top:'+f.bbox[1]+'pt;width:'+(f.bbox[2]-f.bbox[0])+'pt;height:'+(f.bbox[3]-f.bbox[1])+'pt"></div>').join('');}
 const figPreview=new Map();
 function figUrl(el){return '/pdf/'+ID+'/image/'+el.dataset.page+'/'+el.dataset.img;}
+// 그림 잡기 영역이 아닌 곳(글자 등)에서 마우스를 누르면 놓을 때까지 그림 잡기를 끈다
+addEventListener('mousedown',e=>{if(e.button===0&&!(e.target.closest&&e.target.closest('.figgrab')))document.body.classList.add('selecting');},true);
+for(const ev of ['mouseup','blur','dragend'])addEventListener(ev,()=>document.body.classList.remove('selecting'),true);
 document.addEventListener('mouseover',e=>{const f=e.target.closest&&e.target.closest('.figgrab');if(f&&!figPreview.has(figUrl(f))){const im=new Image();im.src=figUrl(f);figPreview.set(figUrl(f),im);}});
 document.addEventListener('dragstart',e=>{
   const f=e.target.closest&&e.target.closest('.figgrab');if(!f)return;
@@ -309,18 +422,31 @@ function loadPage(sec){
   if(ready&&!sec.dataset.tl){sec.dataset.tl=1;fetch('/pdf/'+ID+'/text/'+n).then(r=>r.text()).then(h=>{sec.querySelector('.tlayer').innerHTML=figHtml(n)+h;fitTextLayer(sec);renderAnnotationsPage(+n);loadOcr(sec);});}
 }
 // 사진·스캔처럼 글자 데이터가 없는 곳의 글자(OCR): 글자 층을 깐 뒤 뒤에서 읽고, 끝나면 투명 글자를 덧붙인다
+// OCR 차례: 한 번에 하나만 요청한다(서버도 하나씩 읽는다). 브라우저는 한 서버에 동시 요청을 6개까지만 보내서,
+// 쪽마다 몇 초 걸리는 OCR 요청이 여럿 걸려 있으면 쪽 그림 요청이 줄을 섰다(771쪽 PDF에서 쪽 그림이 7초 넘게 늦음).
+// 지금 보는 쪽에 가까운 쪽부터 읽고, 화면 근처를 벗어난 쪽은 다시 들어올 때까지 미룬다.
+const ocrWant=new Set();let ocrBusy=false;
 function loadOcr(sec){
+  if(!OCR_PAGES.has(+sec.dataset.n)||sec.dataset.ocr==='done')return;   // 그림이 없는 쪽·이미 읽은 쪽은 하지 않는다
+  ocrWant.add(sec);pumpOcr();
+}
+function pumpOcr(){
+  if(ocrBusy)return;
+  const cur=currentPage();
+  const sec=[...ocrWant].filter(s=>visible.has(s)).sort((a,b)=>Math.abs(+a.dataset.n-cur)-Math.abs(+b.dataset.n-cur))[0];
+  if(!sec)return;
+  ocrWant.delete(sec);ocrBusy=true;
   const n=sec.dataset.n,sheet=sec.querySelector('.sheet'),layer=sec.querySelector('.tlayer');
-  if(!OCR_PAGES.has(+n))return;                             // 그림이 없는 쪽은 OCR 하지 않는다
   layer.querySelectorAll('.gtext.ocr').forEach(x=>x.remove());
   let badge=sheet.querySelector('.ocr-wait');if(!badge){badge=document.createElement('div');badge.className='ocr-wait';badge.textContent='그림 속 글자를 읽고 있습니다…';sheet.appendChild(badge);}
   fetch('/pdf/'+ID+'/ocr/'+n).then(async r=>{
     if(r.status===409)return null;
     if(!r.ok)throw Error('OCR HTTP '+r.status);
     return r.text();
-  }).then(h=>{badge.remove();if(h){layer.insertAdjacentHTML('beforeend',h);fitTextLayer(sec);}}).catch(()=>badge.remove());
+  }).then(h=>{badge.remove();sec.dataset.ocr='done';if(h){layer.insertAdjacentHTML('beforeend',h);fitTextLayer(sec);}}).catch(()=>badge.remove())
+    .finally(()=>{ocrBusy=false;pumpOcr();});
 }
-const io=new IntersectionObserver(es=>es.forEach(e=>{const s=e.target;if(e.isIntersecting){visible.add(s);loadPage(s);}else visible.delete(s);}),{rootMargin:'1200px 0px'});
+const io=new IntersectionObserver(es=>{es.forEach(e=>{const s=e.target;if(e.isIntersecting){visible.add(s);loadPage(s);}else visible.delete(s);});pumpOcr();},{rootMargin:'1200px 0px'});
 document.querySelectorAll('.pg').forEach(s=>io.observe(s));
 function placeDocMenu(){
   const menu=docbox.querySelector('.docmenu'),r=btn.getBoundingClientRect(),gap=5;
@@ -342,30 +468,66 @@ function pageList(raw){
   if(!set.size)throw Error('문서화할 페이지를 입력해 주세요.');
   return [...set].sort((a,b)=>a-b);
 }
-async function documentize(pages,includeImages){
-  docbox.classList.remove('open');btn.disabled=true;btn.textContent='문서화 중…';
-  const slow=setTimeout(()=>toast('사진·스캔 속 글자를 읽고 있어 시간이 조금 걸립니다.'),1500);
+// 문서화 규칙(오브젝트 이미지·표 모양): 앱 설정 파일에 저장해 다음에도 그대로 쓴다
+let RULES={objectImages:true,tables:true,blankLines:true,scanTables:false};
+const ruleBoxes=[...document.querySelectorAll('[data-rule]')];
+function showRules(){ruleBoxes.forEach(x=>{x.checked=!!RULES[x.dataset.rule];});}
+fetch('/api/settings',{cache:'no-store'}).then(r=>r.json()).then(s=>{if(s&&s.pdfRules)RULES={...RULES,...s.pdfRules};showRules();}).catch(showRules);
+// 표 인식 모델을 실행할 수 없는 컴퓨터(인텔 맥 등)에서는 스캔본 표 인식을 끄고 막는다
+fetch('/api/pp-structure',{cache:'no-store'}).then(r=>r.json()).then(st=>{if(st.supported)return;const box=document.querySelector('[data-rule="scanTables"]');if(!box)return;box.checked=false;box.disabled=true;box.closest('label').title='이 컴퓨터에서는 레이아웃 분석 모델을 실행할 수 없습니다(인텔 맥 등).';RULES.scanTables=false;}).catch(()=>{});
+function saveRules(){fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pdfRules:RULES})}).catch(()=>toast('문서화 규칙을 저장하지 못했습니다.'));}
+// 스캔본 표 인식: 모델이 없으면 켤 때 내려받는다(받는 동안 진행률, 실패하면 다시 끈다)
+async function installScanTables(box){
+  box.disabled=true;
   try{
-    const r=await fetch('/pdf/'+ID+'/content?pages='+pages.join(',')+'&images='+(includeImages?'1':'0'));const data=await r.json();
+    let st=await (await fetch('/api/pp-structure',{method:'POST'})).json();
+    while(!st.installed&&st.running){toast('레이아웃 분석 모델을 내려받는 중… '+(st.total?Math.floor(st.done/st.total*100):0)+'%');await new Promise(r=>setTimeout(r,800));st=await (await fetch('/api/pp-structure',{cache:'no-store'})).json();}
+    if(!st.installed)throw Error(st.error||'레이아웃 분석 모델을 내려받지 못했습니다.');
+    toast('레이아웃 분석 모델을 설치했습니다.');return true;
+  }catch(err){toast(String(err.message||err));return false;}
+  finally{box.disabled=false;}
+}
+ruleBoxes.forEach(x=>x.addEventListener('change',async()=>{
+  if(x.dataset.rule==='scanTables'&&x.checked&&!(await installScanTables(x))){x.checked=false;return;}
+  RULES={...RULES,[x.dataset.rule]:x.checked};saveRules();
+}));
+// 진행 표시: "글자 읽기 23/96", 레이아웃 분석은 남은 시간도(지금까지 속도로 어림)
+function progressText(p,eta){
+  if(!p)return '';
+  const n=p.total?' '+p.done+'/'+p.total+(p.phase==='레이아웃 분석'?'쪽':''):'';
+  let left='';
+  if(eta&&p.total&&p.done>eta.done0){const per=(Date.now()-eta.t0)/(p.done-eta.done0),sec=Math.round(per*(p.total-p.done)/1000);if(sec>=5)left=' · 약 '+(sec>=90?Math.round(sec/60)+'분':sec+'초')+' 남음';}
+  return p.phase+n+left;
+}
+async function documentize(pages,useRules){
+  docbox.classList.remove('open');btn.disabled=true;btn.textContent='문서화 중…';busy('문서화 중…');
+  const slow=setTimeout(()=>{if(!(useRules&&RULES.scanTables))toast('사진·스캔 속 글자를 읽고 있어 시간이 조금 걸립니다.');},1500);
+  const flag=v=>useRules&&v?'1':'0';
+  // 서버가 알려 주는 진행(레이아웃 분석 몇 쪽째)을 단추에 보여 준다 — 긴 PDF 에서 멈춘 것처럼 보이지 않게
+  let eta=null,watching=true;
+  (async()=>{while(watching){try{const st=await (await fetch('/pdf/'+ID+'/status')).json();if(watching&&st.progress){if(!eta||eta.phase!==st.progress.phase)eta={phase:st.progress.phase,t0:Date.now(),done0:st.progress.done};busy('문서화 중… '+progressText(st.progress,eta));}}catch{}await new Promise(r=>setTimeout(r,700));}})();
+  try{
+    const r=await fetch('/pdf/'+ID+'/content?pages='+pages.join(',')+'&images='+flag(RULES.objectImages)+'&tables='+flag(RULES.tables)+'&blanks='+flag(RULES.blankLines)+'&scan='+flag(RULES.scanTables));const data=await r.json();
     if(!r.ok)throw Error(data.error||'본문을 만들지 못했습니다.');
+    watching=false;btn.textContent='문서화 중…';busy('문서에 넣는 중…');
     parent.postMessage({type:'ogolgye:documentize',id:ID,text:data.text,html:data.html,pages:data.pages},location.origin);
-  }catch(err){btn.disabled=false;btn.textContent='문서화 ▾';toast(String(err.message||err));}
-  finally{clearTimeout(slow);}
+  }catch(err){btn.disabled=false;btn.textContent='문서화 ▾';busy('');toast(String(err.message||err));}
+  finally{clearTimeout(slow);watching=false;}
 }
 function currentPage(){
   const top=document.querySelector('.menu').getBoundingClientRect().bottom,target=top+(innerHeight-top)/2;
   let best=0,dist=Infinity;document.querySelectorAll('.pg').forEach((pg,i)=>{const r=pg.getBoundingClientRect(),d=Math.abs((r.top+r.bottom)/2-target);if(d<dist){dist=d;best=i;}});return best;
 }
 docbox.querySelector('.docmenu').onclick=async e=>{
-  const all=e.target.closest('[data-all]');if(all){documentize(Array.from({length:PAGE_COUNT},(_,i)=>i),all.dataset.images==='1');return;}
+  const all=e.target.closest('[data-all]');if(all){documentize(Array.from({length:PAGE_COUNT},(_,i)=>i),all.dataset.rules==='1');return;}
   const item=e.target.closest('[data-partial]');if(!item)return;
-  const images=document.getElementById('partial-images').checked;
+  const useRules=document.getElementById('partial-rules').checked;
   let pages=[];
   if(item.dataset.partial==='even')pages=Array.from({length:PAGE_COUNT},(_,i)=>i).filter(i=>(i+1)%2===0);
   else if(item.dataset.partial==='odd')pages=Array.from({length:PAGE_COUNT},(_,i)=>i).filter(i=>(i+1)%2===1);
   else if(item.dataset.partial==='current')pages=[currentPage()];
   else{docbox.classList.remove('open');pages=await askText('페이지 지정','문서화할 페이지를 입력하세요. 예: 1-3, 5, 8-10','1-'+PAGE_COUNT,'문서화',pageList);if(!pages)return;}
-  if(!pages.length){toast('해당하는 페이지가 없습니다.');return;}documentize(pages,images);
+  if(!pages.length){toast('해당하는 페이지가 없습니다.');return;}documentize(pages,useRules);
 };
 document.addEventListener('click',e=>{if(!docbox.contains(e.target))docbox.classList.remove('open');});
 // PDF 보기 iframe 위에 새 PDF를 놓아도 바깥 앱이 새 파일을 열 수 있게 전달한다.
@@ -436,7 +598,7 @@ addEventListener('blur',finishGSelect);
 // 줄 폭 맞추기(회전·축소와 무관한 배치 폭으로 잰다)
 function fitTextLayer(root){root.querySelectorAll('.tl').forEach(el=>{el.style.transform='';const want=parseFloat(el.dataset.w)*96/72;const got=el.offsetWidth;if(got>0)el.style.transform='scaleX('+(want/got)+')';});}
 function fit(){
-  const side=B.classList.contains('thumbs-open')?thumbsEl.offsetWidth:0,avail=innerWidth-side;   // 쪽 목록이 열려 있으면 그 옆 공간에 맞춘다
+  const side=B.classList.contains('thumbs-open')?thumbsEl.offsetWidth:0,avail=document.documentElement.clientWidth-side;   // 쪽 목록이 열려 있으면 그 옆 공간에 맞춘다. 세로 스크롤 막대는 뺀 폭(innerWidth 로 재면 막대만큼 넘쳐 가로 스크롤이 생겼다)
   document.documentElement.style.setProperty('--menu-h',document.querySelector('.menu').offsetHeight+'px');
   document.querySelectorAll('.pg').forEach(pg=>{pg.style.transform='';pg.style.margin='';const w=pg.offsetWidth,h=pg.offsetHeight;const k=Math.min(1,(avail-20)/w);pg.style.transform='scale('+k+')';pg.style.setProperty('--inv',1/k);pg.style.marginBottom=(14-h*(1-k))+'px';pg.style.marginLeft=side+Math.max(10,(avail-w*k)/2)+'px';});
 }

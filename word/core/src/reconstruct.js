@@ -20,7 +20,28 @@ export const TOC_LINE = /(?:[.·…‥・ㆍ․_]\s*){4,}\s*(?:\d{1,4}|[ivxlcIVX
 const EDGE_PUNCT = /^[\s"'“”‘’()[\]{}「」『』《》〈〉.,!?;:…·]+|[\s"'“”‘’()[\]{}「」『』《》〈〉.,!?;:…·]+$/g;
 const SYMBOL_FONT = /(symbol|ding|wing|zapf|zymbol|webding|marlett)/i;
 const BULLET_CHARS = /^[•◦▪■□●○◆◇▶▷※]$/;
-const BULLET = /^([•◦▪■□●○◆◇▶▷※\-–—*]|\d{1,3}[.)]|[①-⑳]|[가-하][.)]|\(\d{1,3}\)|[A-Za-z][.)])$/;
+// 번호·기호의 모양(같은 목록의 항목인지): 숫자·글자 자리를 종류로 바꾼다("2." → "9.", "ㄴ)" → "ㄱ)")
+const markShape = (t) => t.replace(/\d+/g, "9").replace(/[a-z]/g, "a").replace(/[A-Z]/g, "A").replace(/[가-힣]/g, "가").replace(/[ㄱ-ㅎ]/g, "ㄱ")
+  .replace(/[①-⑳]/g, "①").replace(/[㉠-㉭]/g, "㉠").replace(/[㉮-㉻]/g, "㉮").replace(/[ⓐ-ⓩ]/g, "ⓐ")
+  .replace(/[Ⓐ-Ⓩ]/g, "Ⓐ").replace(/[⑴-⒇]/g, "⑴").replace(/[一二三四五六七八九十]/g, "一");
+// 앞 줄과 이 줄이 같은 목록의 이웃 항목인가: 같은 모양이고, 기호면 그대로, 번호면 바로 다음 차례(1.→2., 가.→나.)
+// (줄바꿈으로 "…습니다."가 "다."로 시작하는 줄이 연달아 나와도 "다.→다."는 차례가 아니라 잇는다)
+const markOrder = (t) => {
+  const c = t.replace(/[.)(\s]/g, "");
+  if (/^\d+$/.test(c)) return +c;
+  const seqs = ["가나다라마바사아자차카타파하", "ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ", "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "一二三四五六七八九十"];
+  for (const s of seqs) { const i = s.indexOf(c); if (c.length === 1 && i >= 0) return i + 1; }
+  const cp = c.codePointAt(0);
+  for (const [a, b] of [[0x2460, 0x2473], [0x3260, 0x326d], [0x326e, 0x327b], [0x24d0, 0x24e9], [0x24b6, 0x24cf], [0x2474, 0x2487]]) if (c.length === 1 && cp >= a && cp <= b) return cp - a + 1;
+  return null;
+};
+function sameListNext(a, b) {
+  if (!BULLET.test(a) || !BULLET.test(b) || markShape(a) !== markShape(b)) return false;
+  const oa = markOrder(a), ob = markOrder(b);
+  return oa == null && ob == null ? a === b : oa != null && ob === oa + 1;
+}
+// (ㄱ. ㉠ ㉮ ⓐ Ⓐ ⑴ 로마·한자 숫자도 번호 — 문서화가 목록으로 넣으려면 항목마다 문단이 나뉘어 있어야 한다)
+const BULLET = /^([•◦▪■□●○◆◇▶▷※\-–—*]|\d{1,3}[.)]|[①-⑳]|[가-하][.)]|\(\d{1,3}\)|[A-Za-z][.)]|[ㄱ-ㅎ][.)]|[㉠-㉻]|[Ⓐ-ⓩ]|[⑴-⒇]|[ivxIVX]{2,4}[.)]|[一二三四五六七八九十][.)])$/;
 
 // 뒤에 붙기만 하고 단독 어절로는 거의 쓰이지 않는 조사
 const PARTICLES = ["에서부터", "으로부터", "에게서", "으로서", "으로써", "에서", "에게", "까지", "부터", "처럼",
@@ -97,19 +118,28 @@ export function reconstruct(input, opts = {}) {
     const nearMiss = ref.filter((m) => bestX - m.x1 > tolR && bestX - m.x1 < m.size * 1.2).length;
     const justifiedByEdge = ref.length >= 4 && bestN / ref.length >= 0.4 && bestN >= 3
       && nearMiss <= Math.max(1, ref.length * 0.1);
-    const R = justifiedByEdge ? Math.max(...cluster) : Math.max(...ref.map((l) => l.x1));
+    // 짧은 단(줄 몇 개)은 끝이 맞는 줄 수가 모자라다. 끝에 닿은 줄 중 어절 사이가 글자 크기 70% 넘게 벌어진 줄이 둘 이상이면
+    // 양쪽 정렬로 늘린 줄이다("동해물과   백두산이   마르고") — 끝에 못 닿은 보통 간격 줄은 문단 끝이 된다.
+    const stretched = (l) => { const sp = l.gaps.filter((g) => g.isSp && !g.cell).map((g) => g.gap); return sp.length >= 1 && median(sp) > l.size * 0.7; };
+    const justifiedByStretch = !justifiedByEdge && ref.length >= 3 && bestN >= 2 && nearMiss <= 1
+      && bestX >= Math.max(...ref.map((m) => m.x1)) - tolR
+      && ref.filter((m) => Math.abs(m.x1 - bestX) <= tolR && stretched(m)).length >= 2;
+    const R = justifiedByEdge || justifiedByStretch ? Math.max(...cluster) : Math.max(...ref.map((l) => l.x1));
     const pitches = [];
     for (let i = 1; i < ref.length; i++) {
       const d = ref[i].oy - ref[i - 1].oy;
       if (d > 0 && Math.abs(ref[i].size - ref[i - 1].size) < 0.5) pitches.push(d);
     }
-    const justified = justifiedByEdge;
+    const justified = justifiedByEdge || justifiedByStretch;
     // 이 단의 글머리 목록 내어쓰기 위치(기호 뒤 본문 시작점의 대푯값)
     const hangs = gl.filter((l) => l.contentStart - l.x0 > 0.5 && l.contentStart - l.x0 < l.size * 3).map((l) => l.contentStart);
     const hang = hangs.length ? median(hangs) : null;
-    const tableGroup = gl.filter((l) => l.cells).length >= 2;
+    // 칸이 나뉜 줄(표·목차) 또는 점선 + 쪽 번호로 끝나는 목차 줄이 둘 이상인 단
+    const tocLines = gl.filter((l) => !l.cells && TOC_LINE.test(l.text));
+    const tableGroup = gl.filter((l) => l.cells).length >= 2 || tocLines.length >= 2;
     if (tableGroup) {
-      const numRight = median(gl.filter((l) => l.cells).map((l) => l.x1));
+      const withCells = gl.filter((l) => l.cells);
+      const numRight = median((withCells.length ? withCells : tocLines).map((l) => l.x1));
       for (const l of gl) {
         if (l.cells) continue;
         const m = l.text.match(/ (\d{1,4})$/);
@@ -122,7 +152,21 @@ export function reconstruct(input, opts = {}) {
         l.text = l.cells.join("\t");
       }
     }
+    // 가운데 정렬 덩이: 왼쪽 끝이 제각각인데 가운데가 한 세로선에 모이는 줄이 둘 이상이고 덩이의 절반 이상이면 그 선이 축이다.
+    // L·R(줄 시작·끝의 대푯값)은 가운데 정렬 글에서 좌우가 어긋나(테스트5: 115~500, 실제 축 297.6) 가운데 판정을 놓쳤다.
+    const midOf = (l) => (l.x0 + l.x1) / 2, minX0 = Math.min(...gl.map((l) => l.x0));
+    // (왼쪽 끝이 같은 줄이 많으면 내어쓰기·양쪽 정렬 줄이 우연히 가운데가 같은 것이다)
+    let axis = null, axisN = 0;
     for (const l of gl) {
+      const near = gl.filter((m) => Math.abs(midOf(m) - midOf(l)) < m.size * 0.6 && m.x0 - minX0 > m.size);
+      const sameX0 = Math.max(0, ...near.map((m) => near.filter((q) => Math.abs(q.x0 - m.x0) < m.size * 0.5).length));
+      if (near.length > axisN && sameX0 <= Math.max(1, near.length / 3)) { axisN = near.length; axis = median(near.map(midOf)); }
+    }
+    // 표 칸 안 글과 두 줄짜리는 제외(칸 안 가운데 글은 칸 폭을 몰라 줄 바꿈을 판단할 수 없다)
+    if (gl[0].cell || axisN < 3 || axisN < gl.length * 0.5) axis = null;
+    for (const l of gl) {
+      l.axis = axis;
+      l.groupMaxW = Math.max(...gl.map((m) => m.x1 - m.x0));
       l.tableGroup = tableGroup;
       l.L = L; l.R = R; l.pitch = pitches.length ? pct(pitches, 0.3) : l.size * 1.5; l.justified = justified; l.hang = hang;
       // 양쪽 정렬 단의 줄 안에 글자 1.8개 이상 빈 곳 = 텍스트층에 없는 글자 의심
@@ -145,6 +189,9 @@ export function reconstruct(input, opts = {}) {
   const dict = buildDictionary(lines);
 
   // ── 1차: 구조적 문단 경계 + 여유폭(slack) 수집 → 줄바꿈 방식 추정
+  const groupTop = new Map();
+  for (const l of lines) groupTop.set(l.group, Math.min(groupTop.get(l.group) ?? Infinity, l.oy));
+  for (const l of lines) l.groupTop = groupTop.get(l.group);
   const pairs = [];
   for (let i = 1; i < lines.length; i++) pairs.push(analyzePair(lines[i - 1], lines[i], lines[i + 1], bodySize, spaceW, lines[i - 2]));
   let mode = o.wrapMode;
@@ -182,42 +229,171 @@ export function reconstruct(input, opts = {}) {
   const paragraphs = [];
   let cur = null;
   const dropped = new Set();
+  // 바로 위·아래 줄과 왼쪽 끝이 나란한 줄은 가운데 정렬이 아니다: 옆의 상자 때문에 중간부터 좁아진 단에서는 왼쪽 끝이
+  // 단 전체의 왼쪽 끝보다 안쪽이라, 짧은 한 줄 대사가 우연히 단 가운데에 놓이면 가운데 정렬로 잘못 봤다
+  // (이웃 줄도 가운데 줄이면 폭이 같은 가운데 줄들 — 가사·주소·제목 묶음 — 이므로 그대로 가운데)
+  // 이웃 줄이 이 줄보다 길어야 한다(단의 왼쪽 끝을 정해 주는 줄) — 짧은 이웃과 우연히 나란한 제목은 그대로 가운데
+  const leftAligned = (i) => [lines[i - 1], lines[i + 1]].some((o) => o && o.group === lines[i].group && !o.spanTitle && !centered(o)
+    && Math.abs(o.x0 - lines[i].x0) < lines[i].size * 0.3 && Math.abs(o.oy - lines[i].oy) < lines[i].size * 4
+    && o.x1 - lines[i].x1 > lines[i].size * 1.5);
   lines.forEach((l, i) => {
     const j = i > 0 ? joins[i - 1] : null;
     if (!cur || j.kind === "para") {
-      cur = { role: l.size > bodySize * 1.15 ? "heading" : "body", lines: [i], page: l.page, text: l.text, cell: l.cell || undefined, highlight: l.highlight || undefined };
+      cur = { role: l.size > bodySize * 1.15 ? "heading" : "body", lines: [i], center: (centered(l) && (l.spanTitle || !leftAligned(i))) || undefined, page: l.page, text: l.text, cell: l.cell || undefined, highlight: l.highlight || undefined };
       paragraphs.push(cur);
       return;
     }
     cur.lines.push(i);
+    if (cur.center && !centered(l)) cur.center = undefined;
     if (j.kind === "hyphen-drop") { cur.text = cur.text.slice(0, -1); dropped.add(lines[i - 1].glyphs.at(-1).id); }
     cur.text += (j.kind === "space" ? " " : "") + l.text;
   });
 
   for (const para of paragraphs) para.layout = paragraphLayout(para.lines.map((i) => lines[i]));
 
-  // 그림: 배경·재단선 밖·글자 바탕(상자)이 아닌 이미지를 읽기 순서 속 위치와 함께
+  // 그림: 읽기 순서 속 위치와 함께. kind 는
+  //   figure: 내용 그림(오브젝트). 기본은 PDF 에 든 원본 그림 파일 그대로(겹친 다른 그림에 맞춰 자르지 않는다).
+  //     render 가 켜진 그림만 쪽의 그 부분을 보이는 그대로 그린다(그 위의 글자·그림까지 한 장, 그 안의 글은 문서화에서 뺀다):
+  //       · 표지: 쪽을 거의(70% 이상) 덮는 그림 위에 제목처럼 큰 글이 얹힌 쪽
+  //       · 여러 조각(띠)으로 나뉘어 저장된 한 그림
+  //       · 쪽 밖으로 삐져나간 그림(보이는 부분만)
+  //   text-backdrop: 글자 밑에 깐 바탕(제목 칸 음영 등, 글자 잉크가 넓이의 28% 이상). 넣지 않는다.
+  //   panel: 글상자 바탕 — 그림(카드·쪽지·상자) 위에 본문 글이 얹힌 것. 글은 글로 옮기고,
+  //     "표 모양 살리기"면 그 글을 1칸 표로 감싸 바탕 그림의 평균 색을 칸 바탕으로 쓴다(session.js). 그림 자체는 넣지 않는다.
+  //   background: 배경 — 같은 그림(같은 픽셀 크기·같은 데이터)이 되풀이되며 쪽의 절반 이상을 덮거나 전체 쪽의 절반 이상에
+  //     나오는 것(종이 질감·쪽 머리 장식 띠), 또는 쪽을 거의 덮는 그림 위에 본문이 빽빽한 것. 문서화에 넣지 않는다.
+  const repeatKey = (im) => `${im.px?.[0]}x${im.px?.[1]}:${im.rawLen ?? ""}`;
+  const repeatPages = new Map();
+  for (const page of input.pages) for (const key of new Set((page.images || []).map(repeatKey))) repeatPages.set(key, (repeatPages.get(key) || 0) + 1);
+  const glyphsOver = (page, b) => page.glyphs.filter((g) => !isSpace(g.c) && (g.x0 + g.x1) / 2 > b[0] && (g.x0 + g.x1) / 2 < b[2] && (g.y0 + g.y1) / 2 > b[1] && (g.y0 + g.y1) / 2 < b[3]);
+  const isBackground = (page, im, b) => {
+    const n = repeatPages.get(repeatKey(im)) || 0;
+    if (n < 2) return false;
+    return n >= input.pages.length * 0.5 || (b[2] - b[0]) * (b[3] - b[1]) >= page.width * page.height * 0.5;
+  };
+  // 쪽 머리·꼬리 장식 띠: 쪽 맨 위(아래) 12% 안의 얇은 그림이 다른 쪽 2곳 이상의 같은 높이에도 있다(쪽마다 글자가 달라도)
+  const bandOf = (page, b) => {
+    const H = page.height;
+    if (b[3] - b[1] > H * 0.1) return null;
+    return b[3] <= H * 0.12 ? "top" : b[1] >= H * 0.88 ? "bottom" : null;
+  };
+  const isRunningBand = (page, b) => {
+    if (!bandOf(page, b)) return false;
+    let others = 0;
+    for (const q of input.pages) {
+      if (q === page) continue;
+      if ((q.images || []).some((im) => Math.abs(im.bbox[1] - b[1]) <= 3 && Math.abs(Math.min(q.height, im.bbox[3]) - b[3]) <= 3)) others++;
+    }
+    return others >= 2;
+  };
+  // 글 줄이 그림 안에 갇혀 있는가: 그림과 겹치는 본문 줄 가운데 그림 안에 온전히 든 줄이 2줄 이상, 80% 이상
+  const linesBoxedBy = (page, b) => {
+    let n = 0, inside = 0;
+    for (const l of lines) {
+      if (l.page !== page.index) continue;
+      const top = l.oy - l.size;
+      if (l.x1 <= b[0] || l.x0 >= b[2] || l.oy <= b[1] || top >= b[3]) continue;
+      n++;
+      if (l.x0 >= b[0] - 3 && l.x1 <= b[2] + 3 && top >= b[1] - 3 && l.oy <= b[3] + 3) inside++;
+    }
+    return inside >= 2 && inside >= n * 0.8;
+  };
   const figures = [];
   for (const page of input.pages) {
-    const regs = page._regions || [];
-    for (const im of page.images || []) {
-      const b = [Math.max(0, im.bbox[0]), Math.max(0, im.bbox[1]), Math.min(page.width, im.bbox[2]), Math.min(page.height, im.bbox[3])];
-      // 배경(쪽의 절반 이상을 덮는 그림): 그 위에 본문 글자가 깔려 있으면 종이 질감 같은 바탕이라 빼고,
-      // 본문 글자가 거의 없으면(지도·사진 한 장짜리 쪽 등) 내용 그림으로 넣는다
-      if (im.background) {
-        const over = page.glyphs.filter((g) => !isSpace(g.c) && (g.x0 + g.x1) / 2 > b[0] && (g.x0 + g.x1) / 2 < b[2] && (g.y0 + g.y1) / 2 > b[1] && (g.y0 + g.y1) / 2 < b[3]).length;
-        if (over >= 10) continue;
+    const W = page.width, H = page.height;
+    const regs = page._regions || [];                 // panel: 글자 잉크가 넓이의 28% 이상을 덮는 그림(글자 밑에 깐 바탕)
+    const clip = (bb) => [Math.max(0, bb[0]), Math.max(0, bb[1]), Math.min(W, bb[2]), Math.min(H, bb[3])];
+    const items = (page.images || []).map((im) => ({ im, b: clip(im.bbox) })).filter((x) => x.b[2] - x.b[0] >= 5 && x.b[3] - x.b[1] >= 5);
+    // 한 그림이 여러 조각(띠)으로 저장된 경우: 같은 폭(또는 높이)으로 맞닿은 조각을 하나로 묶는다
+    const group = items.map((_, i) => i);
+    const root = (i) => (group[i] === i ? i : (group[i] = root(group[i])));
+    const near = (a, b) => Math.abs(a - b) <= 2;
+    for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
+      const a = items[i].b, c = items[j].b;
+      const stackedV = near(a[0], c[0]) && near(a[2], c[2]) && (near(a[3], c[1]) || near(c[3], a[1]));
+      const stackedH = near(a[1], c[1]) && near(a[3], c[3]) && (near(a[2], c[0]) || near(c[2], a[0]));
+      // 겹쳐 놓은 조각(장식 띠 + 촉수 그림처럼 한 장식을 두 그림으로 저장): 작은 쪽 넓이의 10% 이상 겹치면 한 그림.
+      // 쪽 절반 넘게 덮는 그림(배경·종이 질감)은 묶지 않는다
+      const area = (q) => (q[2] - q[0]) * (q[3] - q[1]);
+      const ov = Math.max(0, Math.min(a[2], c[2]) - Math.max(a[0], c[0])) * Math.max(0, Math.min(a[3], c[3]) - Math.max(a[1], c[1]));
+      // 글이 얹힌 그림(글상자 바탕·카드)은 묶지 않는다 — 글상자 판정(1칸 표)이 풀린다
+      const overlapped = area(a) < W * H * 0.5 && area(c) < W * H * 0.5 && ov >= Math.min(area(a), area(c)) * 0.1
+        && glyphsOver(page, a).length < 3 && glyphsOver(page, c).length < 3;
+      // 맞닿아 놓인 두 그림이 둘 다 글을 얹고 있으면 따로 놓인 카드 둘(나란히 붙은 핸드아웃 카드 — 1pt 떨어짐)이다.
+      // 묶으면 두 카드의 글이 한 글상자(표)에 섞였다. 글 없는 조각(두루마리 막대 등)만 몸통에 묶는다.
+      const twoCards = (stackedV || stackedH) && glyphsOver(page, a).length >= 3 && glyphsOver(page, c).length >= 3;
+      if ((stackedV || stackedH || overlapped) && !twoCards) group[root(i)] = root(j);
+      if (overlapped && !stackedV && !stackedH) { items[i].overlay = true; items[j].overlay = true; }
+    }
+    const groups = new Map();
+    items.forEach((x, i) => { const r = root(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(x); });
+    for (const parts of groups.values()) {
+      const b = [Math.min(...parts.map((x) => x.b[0])), Math.min(...parts.map((x) => x.b[1])), Math.max(...parts.map((x) => x.b[2])), Math.max(...parts.map((x) => x.b[3]))];
+      const im = parts[0].im, single = parts.length === 1;
+      const over = glyphsOver(page, b);
+      const display = over.filter((g) => g.size >= bodySize * 1.4).length;   // 제목처럼 큰 글자
+      const titled = over.length >= 3 && display >= over.length * 0.4;
+      let kind = "figure", render = !single, solo = false;   // solo: 그 그림 하나만 보이는 그대로(기울인 그림)
+      if (single && (isBackground(page, im, b) || isRunningBand(page, b))) kind = "background";
+      else if ((b[2] - b[0]) * (b[3] - b[1]) >= W * H * 0.7) {
+        // 쪽을 거의 덮는 그림: 위에 글이 없으면 원본 그림, 큰 제목이 얹히면 표지(보이는 그대로),
+        // 본문이 빽빽하면 종이 바탕, 본문이 그림 안에 갇혀 있으면 글상자
+        if (over.length < 3) render = !single;
+        else if (titled) render = true;
+        else if (over.length >= 200) kind = "background";
+        else if (linesBoxedBy(page, b)) kind = "panel";
+      } else if (!single && linesBoxedBy(page, b)) {
+        // 여러 조각으로 저장된 카드(위·아래 막대가 달린 두루마리 모양 핸드아웃 등)도 글 줄이 그 안에 갇혀 있으면 글상자.
+        // 예전에는 조각을 묶은 그림은 보이는 그대로 그려, 한 장짜리 카드(글상자 → 표)와 결과가 달랐다
+        kind = "panel"; render = false;
+      } else if (single) {
+        // 기울어진 글자(그림 속 글자)가 얹힌 그림(기울여 놓은 손글씨 쪽지 등): 그 글자는 문서화 본문에 들지 않으므로
+        // 보이는 그대로(글씨까지) 한 장의 그림으로. 원본 그림만 넣으면 글씨 없는 빈 종이가 된다.
+        const slanted = (page.imageText || []).filter((g) => !isSpace(g.c) && (g.x0 + g.x1) / 2 > b[0] && (g.x0 + g.x1) / 2 < b[2] && (g.y0 + g.y1) / 2 > b[1] && (g.y0 + g.y1) / 2 < b[3]).length;
+        // 글 줄이 그림 안에 갇힌 그림(카드·쪽지·상자)은 글상자 바탕. 글 단이 그림 위를 지나가기만 하면(장식 그림) 그대로 그림
+        if (slanted >= 10) render = true;
+        else if (linesBoxedBy(page, b)) kind = "panel";
+        // 글자 밑에 깐 바탕(제목 칸 음영, 글자 뒤 작은 장식 등): 그림으로 넣지 않는다
+        else if (regs.find((r) => r.id === im.id)?.kind === "panel") kind = "text-backdrop";
+        else if (im.bbox[0] < -2 || im.bbox[1] < -2 || im.bbox[2] > W + 2 || im.bbox[3] > H + 2) render = true;   // 쪽 밖으로 삐져나간 그림은 보이는 부분만
+        // 기울여 놓은 그림(테스트1 전단지: 90°+3° 회전)은 원본을 꺼내면 가장자리가 잘렸다 → 그 그림만 보이는 그대로(기울기 포함)
+        else if (im.tilted) { render = true; solo = true; }
       }
-      if (b[2] - b[0] < 5 || b[3] - b[1] < 5) continue;
-      const reg = regs.find((r) => r.id === im.id);
-      const kind = reg?.kind === "panel" ? "panel-background" : "figure";
       // 같은 쪽에서 그림 위쪽보다 아래에 있고 그림과 가로로 겹치는 첫 문단 앞에 놓는다
       let before = paragraphs.findIndex((p) => {
         const l = lines[p.lines[0]];
         return l.page === page.index && l.oy - l.size > b[1] && l.x1 > b[0] && l.x0 < b[2];
       });
       if (before < 0) { const last = paragraphs.map((p, k) => [p, k]).filter(([p]) => p.page === page.index).at(-1); before = last ? last[1] + 1 : paragraphs.length; }
-      figures.push({ id: im.id, page: page.index, bbox: b, px: im.px, kind, beforeParagraph: before, file: im.file || null });
+      // overlay: 겹쳐 저장된 조각을 묶은 그림 — 그 조각들만(종이 배경·글자 없이) 한 장으로 그린다(session.js)
+      const overlay = !single && parts.some((x) => x.overlay);
+      // ids: 이 그림을 이루는 그림 조각들 — 보이는 그대로 그릴 때 이것 말고 다른 그림(종이 배경 등)은 숨긴다(session.js)
+      figures.push({ id: im.id, page: page.index, bbox: b, px: im.px, kind, render, parts: parts.length, beforeParagraph: before, file: im.file || null,
+        ids: parts.map((x) => x.im.id), ...(overlay ? { overlay: true } : {}), ...(solo ? { solo: true } : {}) });
+    }
+    // 나중에 그려진 다른 그림에 85% 이상 덮인 그림(그림자 등)은 보이지 않으므로 넣지 않는다
+    const seqOf = new Map((page.images || []).map((im) => [im.id, im.seq ?? 0]));
+    const pageFigs = figures.filter((f) => f.page === page.index);
+    for (const f of pageFigs) {
+      if (f.kind !== "figure") continue;
+      const area = (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]);
+      const covered = pageFigs.some((o) => o !== f && o.kind !== "background" && seqOf.get(o.id) > seqOf.get(f.id) &&
+        Math.max(0, Math.min(f.bbox[2], o.bbox[2]) - Math.max(f.bbox[0], o.bbox[0])) * Math.max(0, Math.min(f.bbox[3], o.bbox[3]) - Math.max(f.bbox[1], o.bbox[1])) >= area * 0.85);
+      if (covered) f.kind = "covered";
+    }
+    // 글상자 안의 가늘고 긴 장식 줄 그림(가로세로 5:1 이상)은 글상자를 표로 옮길 때 함께 빠진다
+    const panels = pageFigs.filter((f) => f.kind === "panel");
+    for (const f of pageFigs) {
+      if (f.kind !== "figure" || f.render) continue;
+      const w = f.bbox[2] - f.bbox[0], h = f.bbox[3] - f.bbox[1], cx = (f.bbox[0] + f.bbox[2]) / 2, cy = (f.bbox[1] + f.bbox[3]) / 2;
+      if (Math.max(w / h, h / w) >= 5 && panels.some((p) => cx > p.bbox[0] && cx < p.bbox[2] && cy > p.bbox[1] && cy < p.bbox[3])) f.kind = "panel-ornament";
+    }
+    // 보이는 그대로 그린 그림(표지 등) 안에 든 다른 그림(로고 등)은 이미 그려져 있으므로 따로 넣지 않는다
+    const drawn = figures.filter((f) => f.page === page.index && f.kind === "figure" && f.render && !f.overlay && !f.solo);
+    for (const f of figures) {
+      if (f.page !== page.index || f.kind !== "figure" || drawn.includes(f)) continue;
+      const cx = (f.bbox[0] + f.bbox[2]) / 2, cy = (f.bbox[1] + f.bbox[3]) / 2;
+      if (drawn.some((d) => cx > d.bbox[0] && cx < d.bbox[2] && cy > d.bbox[1] && cy < d.bbox[3])) f.kind = "inside-drawn";
     }
   }
 
@@ -303,7 +479,18 @@ function pageRegions(page) {
     const cover = ink / ((x1 - x0) * (y1 - y0));
     // 쪽 전체를 감싸는 테두리는 흐름을 나누지 않는다
     if ((x1 - x0) * (y1 - y0) > W * H * 0.8) continue;
-    regions.push({ id: c.id, bbox: [x0, y0, x1, y1], kind: cover >= 0.28 ? "panel" : "figure", cover: +cover.toFixed(3) });
+    // 카드(핸드아웃 등): 글이 성겨 잉크 비율은 낮아도, 글자 20개 이상이 그림 안에 온전히 들고 가장자리를 걸친 글자가 거의 없으면
+    // 글상자로 본다 — 아니면 나란히 놓인 카드들이 쪽의 두 단으로 읽혀 왼쪽 카드 둘을 먼저, 오른쪽 카드를 나중에 읽었다
+    let carded = false;
+    if (c.kind === "image" && cover < 0.28) {
+      let inside = 0, straddle = 0;
+      for (const g of page.glyphs) {
+        if (isSpace(g.c) || g.x1 <= x0 || g.x0 >= x1 || g.y1 <= y0 || g.y0 >= y1) continue;
+        if (g.x0 >= x0 - 1 && g.x1 <= x1 + 1 && g.y0 >= y0 - 1 && g.y1 <= y1 + 1) inside++; else straddle++;
+      }
+      carded = inside >= 20 && straddle <= inside * 0.05;
+    }
+    regions.push({ id: c.id, bbox: [x0, y0, x1, y1], kind: cover >= 0.28 || carded ? "panel" : "figure", cover: +cover.toFixed(3), ...(carded ? { carded: true } : {}) });
   }
   return regions;
 }
@@ -348,8 +535,19 @@ function detectTables(page) {
     const vs = cs.filter((c) => c.v).map((c) => c.v), hs = cs.filter((c) => c.h).map((c) => c.h);
     const bx0 = Math.min(...cs.map((c) => c.b[0])), by0 = Math.min(...cs.map((c) => c.b[1])), bx1 = Math.max(...cs.map((c) => c.b[2])), by1 = Math.max(...cs.map((c) => c.b[3]));
     const uniqX = [...new Set(vs.map((v) => Math.round(v.x)))].sort((a, b) => a - b).filter((x, k, a) => k === 0 || x - a[k - 1] > 3);
-    if (uniqX.length < 3) continue;                                  // 칸이 2개 이상은 되어야 표
     const inside = ink.filter((g) => { const cx = (g.x0 + g.x1) / 2, cy = (g.y0 + g.y1) / 2; return cx > bx0 && cx < bx1 && cy > by0 && cy < by1; });
+    // 칸이 2개 이상은 되어야 표. 다만 1열이라도 표 폭을 가로지르는 가로줄로 행이 나뉘고, 행이 3개 이상이거나 첫 행이
+    // 제목 칸처럼 낮으면(글자 크기의 3배 이하) 표다(제목 칸 + 내용 칸들로 된 능력치 상자 — 예전엔 표 없이 글만 나왔다).
+    // 테두리만 있는 상자(행 1개), 큰 글상자 둘이 위아래로 붙은 것(주보의 한 단 전체 — 표로 보면 옆 단과 읽는 순서가 뒤집혔다)은 아니다
+    if (uniqX.length < 3) {
+      const fullRows = [...new Set(hs.filter((h) => h.x1 - h.x0 >= (bx1 - bx0) * 0.9).map((h) => Math.round(h.y)))].sort((a, b) => a - b).filter((y, k, a) => k === 0 || y - a[k - 1] > 3);
+      const size = inside.length ? median(inside.map((g) => g.size)) : 0;
+      const titled = fullRows.length >= 3 && size > 0 && fullRows[1] - fullRows[0] <= size * 3;
+      if (!(uniqX.length === 2 && (fullRows.length >= 4 || titled))) continue;
+      // 같은 높이의 옆에 다른 글이 많으면 나란히 놓인 상자들(연도별 계획 도표 등)이다 — 그중 하나만 표가 되면 더 어색하다
+      const beside = ink.filter((g) => { const cx = (g.x0 + g.x1) / 2, cy = (g.y0 + g.y1) / 2; return cy > by0 && cy < by1 && (cx < bx0 - 2 || cx > bx1 + 2); }).length;
+      if (beside > inside.length * 0.2) continue;
+    }
     if (inside.length < 4) continue;
     // 표 높이 안의 글자가 표 밖으로 많이 삐져나오면 표가 아니라 장식(라벨 상자 등)
     const spill = ink.filter((g) => { const cy = (g.y0 + g.y1) / 2; const cx = (g.x0 + g.x1) / 2; return cy > by0 && cy < by1 && (cx < bx0 - 2 || cx > bx1 + 2) && cx > bx0 - 40 && cx < bx1 + 40; });
@@ -362,7 +560,8 @@ function detectTables(page) {
       const xs = [...new Set([Math.round(bx0 + 1), ...cuts, Math.round(bx1 - 1)])].sort((a, b) => a - b).filter((x, k, a) => k === 0 || x - a[k - 1] > 3);
       rows.push({ y0: ys[r], y1: ys[r + 1], cells: xs.slice(0, -1).map((x, c) => ({ x0: x, x1: xs[c + 1] })) });
     }
-    tables.push({ id: tables.length, bbox: [bx0, by0, bx1, by1], rows });
+    // hlines: 가로선 [y, x0, x1] — 문서화에서 위아래로 합친 칸(선이 지나지 않는 행 경계)을 찾는 데 쓴다
+    tables.push({ id: tables.length, bbox: [bx0, by0, bx1, by1], rows, hlines: hs.map((h) => [h.y, h.x0, h.x1]) });
   }
   return tables;
 }
@@ -405,13 +604,71 @@ function buildPageLines(page) {
     else rows.push({ oy: g.oy, size: g.size, gs: [g] });
   }
   for (const r of rows) r.gs.sort((a, b) => a.x0 - b.x0);
+  // 장식 제목의 아주 큰 첫·끝 글자: "BERLIN" 의 큰 B·N 은 아래 끝(기준선)이 작은 부제 줄("THE WICKED CITY")과 맞아
+  // 그 줄로 들어가 "ERLI" / "Bthe wicked city N" 으로 갈렸다. 줄의 다른 글자보다 2배 넘게 큰 글자가, 크기가 비슷한
+  // 다른 줄과 세로로 겹치고 그 줄 끝에 바로 붙어 있으면 그 줄로 옮긴다.
+  {
+    const med = (a) => { const b = [...a].sort((x, y) => x - y); return b[b.length >> 1]; };
+    for (const r of rows) {
+      if (r.gs.length < 3) continue;
+      const body = med(r.gs.map((g) => g.size));
+      for (const g of [...r.gs]) {
+        if (g.size < body * 2) continue;
+        const to = rows.find((o) => o !== r && o.gs.length && o.oy > g.y0 && o.oy < g.oy - body * 0.5
+          && Math.abs(Math.log(med(o.gs.map((q) => q.size)) / g.size)) < Math.log(1.6)
+          && (Math.abs(o.gs[0].x0 - g.x1) < g.size * 1.1 || Math.abs(g.x0 - o.gs.at(-1).x1) < g.size * 1.1));
+        if (!to) continue;
+        r.gs.splice(r.gs.indexOf(g), 1); to.gs.push(g); to.gs.sort((a, b) => a.x0 - b.x0); g._bigJoin = true;
+      }
+    }
+    for (let k = rows.length - 1; k >= 0; k--) if (!rows[k].gs.length) rows.splice(k, 1);
+  }
+  // 위아래로 조금 떠 있는 줄임표·가운뎃점: 글꼴에 따라 "…"가 같은 줄 글자보다 기준선이 몇 pt 높게 찍혀(8.5pt 글에서 3pt)
+  // 따로 한 줄이 됐다 — 문단 중간에 "…"만 든 줄이 끼어 줄 잇기가 끊기고 제자리에는 빈칸이 남았다.
+  // 그런 글자가 자기 줄에서 이웃 글자 없이 떨어져 있으면(같은 높이의 옆 단 줄에 끼어든 경우도 있다), 기준선이 글자 크기의
+  // 60% 안이고 그 가로 자리가 비어 있으며 바로 옆에 글자가 있는 가장 가까운 줄로 옮긴다.
+  {
+    const FLOAT = /^[…‥⋯·・‧∙]$/;
+    const near = (row, g) => row.gs.some((o) => o !== g && !FLOAT.test(o.c) && o.x0 < g.x1 + g.size * 1.2 && o.x1 > g.x0 - g.size * 1.2);
+    for (const r of rows) {
+      for (const g of r.gs.filter((q) => FLOAT.test(q.c))) {
+        if (near(r, g)) continue;                                                      // 자기 줄에 붙어 있다
+        let best = null;
+        for (const o of rows) {
+          if (o === r || !o.gs.length || Math.abs(o.oy - g.oy) > g.size * 0.6) continue;
+          if (o.gs.some((q) => Math.min(q.x1, g.x1) - Math.max(q.x0, g.x0) > (g.x1 - g.x0) * 0.3)) continue;   // 그 자리에 이미 글자가 있다
+          if (!near(o, g)) continue;                                                   // 그 줄 글자 옆이 아니다
+          if (!best || Math.abs(o.oy - g.oy) < Math.abs(best.oy - g.oy)) best = o;
+        }
+        if (!best) continue;
+        r.gs.splice(r.gs.indexOf(g), 1);
+        best.gs.push(g); best.gs.sort((a, b) => a.x0 - b.x0);
+      }
+    }
+    for (let k = rows.length - 1; k >= 0; k--) if (!rows[k].gs.length) rows.splice(k, 1);
+  }
+  // 목차 점선(리더)을 글자 코드 없는 글자로 넣은 PDF: 좁은 무명 글자(U+FFFD)가 3개 이상 고른 간격으로
+  // 늘어서 있거나 2개 이상 늘어선 바로 뒤가 쪽 번호면 마침표로 읽는다(글꼴의 마침표에 ToUnicode 가 빠진 경우).
+  for (const r of rows) {
+    for (let i = 0; i < r.gs.length;) {
+      let j = i;
+      while (j < r.gs.length && r.gs[j].c === "�" && r.gs[j].x1 - r.gs[j].x0 <= r.gs[j].size * 0.45
+        && (j === i || r.gs[j].font === r.gs[i].font)) j++;
+      const run = r.gs.slice(i, j);
+      const steps = run.slice(1).map((g, k) => g.x0 - run[k].x0);
+      const beforeNumber = j < r.gs.length && /\d/.test(r.gs[j].c) && r.gs.slice(j).every((g) => /\d/.test(g.c));
+      if ((run.length >= 3 || (run.length === 2 && beforeNumber)) && Math.max(...steps) - Math.min(...steps) <= run[0].size * 0.3) for (const g of run) { g.c = "."; g.leader = true; }
+      i = Math.max(j, i + 1);
+    }
+  }
 
   // 상자(사이드바) 안과 밖은 단 구조가 다를 수 있으므로 흐름마다 따로 단을 나눈다.
   // 상자 밖(본문) 흐름을 먼저, 상자들은 위치 순서대로 그 뒤에 둔다.
   const ordered = [];
   let section = 0;
+  // 위쪽 끝이 거의 같은(6pt 안) 상자는 같은 줄로 보고 왼쪽부터(나란히 놓인 카드의 위끝이 소수점만큼 달라 오른쪽이 먼저 읽혔다)
   const flowIds = [...new Set(rows.flatMap((r) => r.gs.map((g) => g._panel)))].sort((a, b) =>
-    (a === -1 ? -1 : b === -1 ? 1 : panels[a].bbox[1] - panels[b].bbox[1] || panels[a].bbox[0] - panels[b].bbox[0]));
+    (a === -1 ? -1 : b === -1 ? 1 : Math.abs(panels[a].bbox[1] - panels[b].bbox[1]) > 6 ? panels[a].bbox[1] - panels[b].bbox[1] : panels[a].bbox[0] - panels[b].bbox[0]));
   for (const pid of flowIds) {
     const rowsP = rows.map((r) => ({ oy: r.oy, size: r.size, gs: r.gs.filter((g) => g._panel === pid) })).filter((r) => r.gs.length);
     flow(rowsP, pid);
@@ -451,6 +708,30 @@ function buildPageLines(page) {
         part.push(g); c = gc;
       }
       if (part.length) segs.push({ gs: part, col: startCol, oy: r.oy });
+      // 조각이 걸친 마지막 단(단 경계를 건넌 조각 = 일부 단에만 걸친 글)
+      for (const sg of segs) if (sg.colEnd == null) sg.colEnd = colOf((sg.gs.at(-1).x0 + sg.gs.at(-1).x1) / 2);
+    }
+
+    // 2-1) 단 위·사이의 가운데 제목: 짧아서 가운데 단 안에 들어가 버리는 제목("Main Title")은 단 경계를 건너지 않아
+    //      2단 첫 줄로 읽혔다. 흐름 한가운데에 혼자 놓이고(자기 단 왼쪽 끝에서 들여 시작), 그 높이 위아래 1.5줄 안에
+    //      다른 단의 글이 없으면 단을 가로지르는 줄로 본다.
+    if (gutters.length) {
+      const mid = (flowSpan[0] + flowSpan[1]) / 2, pitch = flowBody * 1.25;
+      const colLeft = new Map();
+      for (const x of segs) if (x.col >= 0) colLeft.set(x.col, Math.min(colLeft.get(x.col) ?? Infinity, x.gs[0].x0));
+      for (const s of segs) {
+        if (s.col < 0) continue;
+        const x0 = s.gs[0].x0, x1 = s.gs.at(-1).x1, sz = median(s.gs.map((g) => g.size));
+        const centered = Math.abs((x0 + x1) / 2 - mid) <= Math.max(sz * 1.5, (flowSpan[1] - flowSpan[0]) * 0.03);
+        // 자기 단 왼쪽 끝에서 시작하는 줄은 보통 단 본문이다. 다만 본문보다 크고 다른 단의 모든 글보다 위에 있으면
+        // 단 위 제목이다(테스트5 2쪽 "이거는 제목": 24pt, 2단 왼쪽 끝에서 6pt 안쪽)
+        const aboveAll = sz > flowBody * 1.3 && segs.every((o) => o === s || o.col === s.col || o.col < 0 || o.oy > s.oy);
+        if (!centered || (x0 - colLeft.get(s.col) <= sz && !aboveAll)) continue;
+        // 큰 제목은 자기 글자 크기로 재면 바로 아래 본문 첫 줄까지 "가까움"이 되어(테스트5 2쪽 24pt 제목) 옆 단 글의 크기로 잰다
+        const near = segs.some((o) => o !== s && o.col !== s.col && o.col >= 0
+          && Math.abs(o.oy - s.oy) < Math.max(pitch, median(o.gs.map((g) => g.size))) * 1.5);
+        if (!near) { s.col = -1; s.spanTitle = true; }
+      }
     }
 
     // 3-0) 표가 있는 쪽: 표의 왼쪽 가장자리를 사이에 두고 양쪽에 걸친 줄은 거기서 자른다
@@ -510,9 +791,38 @@ function buildPageLines(page) {
       bucket = [];
       section++;
     };
+    // 일부 단에만 걸친 글(1~2단 폭의 설명 등)이 나머지 단의 글이 모두 끝난 아래에서 시작하면
+    // 단 구조가 바뀐 것이므로 새 구역으로 본다. 바로 위에 붙은 짧은 머리 줄("Key:")도 같이 옮긴다.
+    const pitch = flowBody * 1.25;
+    // 진짜 단(각 단에 본문 줄이 3개 이상)이고, 그 글이 걸친 단들의 폭을 대부분 채울 때만
+    const realSpan = (s) => {
+      for (let c = 0; c <= gutters.length; c++) if (bucket.filter((x) => x.col === c && x.panel === s.panel).length < 3) return false;
+      const inCols = bucket.filter((x) => x.col >= s.col && x.col <= s.colEnd && x.panel === s.panel);
+      const L = Math.min(...inCols.map((x) => x.gs[0].x0)), R = Math.max(...inCols.map((x) => x.gs.at(-1).x1));
+      return s.gs.at(-1).x1 - s.gs[0].x0 >= (R - L) * 0.5;
+    };
     for (const s of segs.sort((a, b) => a.oy - b.oy)) {
-      if (s.col === -1) { flush(); ordered.push({ ...s, section, col: 0 }); section++; }
-      else bucket.push(s);
+      if (s.col === -1) { flush(); ordered.push({ ...s, section, col: 0 }); section++; continue; }
+      if (s.colEnd > s.col && bucket.length && gutters.length && gutters.length <= 3 && realSpan(s)) {
+        const inSpan = (x) => x.col >= s.col && x.col <= s.colEnd;
+        const others = bucket.filter((x) => !inSpan(x) && x.panel === s.panel);
+        const quiet = !others.some((x) => x.oy > s.oy - pitch * 3);
+        const spanned = bucket.filter((x) => inSpan(x) && x.panel === s.panel).sort((a, b) => b.oy - a.oy);
+        if (quiet && spanned.length) {
+          const chain = [];
+          let yy = s.oy;
+          for (const x of spanned) { if (yy - x.oy > pitch * 1.4) break; chain.push(x); yy = x.oy; }
+          const rest = spanned.slice(chain.length);
+          const gapAbove = rest.length ? yy - rest[0].oy : Infinity;
+          const carry = chain.length <= 3 && gapAbove > pitch * 1.6 ? chain : [];
+          if (chain.length === carry.length) {
+            bucket = bucket.filter((x) => !carry.includes(x));
+            flush();
+            bucket.push(...carry);
+          }
+        }
+      }
+      bucket.push(s);
     }
     flush();
 
@@ -740,6 +1050,16 @@ function makeLine(seg, page, spaceGlyphs) {
     const uniform = small.filter((g) => Math.abs(g - b0) < size * 0.08).length / small.length;
     if (uniform >= 0.6) base = b0;
   }
+  const explicitAt = (i) => spaces.some((s) => !s.generated && s.x0 >= gs[i - 1].x1 - 1 && s.x1 <= gs[i].x0 + 1 && s.x0 < gs[i].x0);
+  // 낱말 사이에 실제 공백 글자를 넣은 줄: 공백 없는 틈은 그 공백 틈의 60%는 넘어야 띄어쓰기로 본다
+  // (글자 폭이 들쭉날쭉한 글꼴에서 낱말 안의 조금 넓은 틈을 띄어쓰기로 읽어 "afr aid t o"가 되었다)
+  const explicitGaps = [];
+  for (let i = 1; i < gs.length; i++) if (explicitAt(i)) explicitGaps.push(gs[i].x0 - gs[i - 1].x1);
+  // 기준의 상한은 글자 크기의 30%(생성 공백은 20%) — 양쪽 정렬로 실제 공백이 크게 늘어난 줄에서 대시 양옆 같은
+  // 얇은 띄어쓰기("emotions ― to")까지 지우지 않게
+  const expMed = explicitGaps.length >= 2 ? median(explicitGaps) - base : 0;
+  const geomSp = expMed ? Math.max(size * 0.15, Math.min(expMed * 0.6, size * 0.3)) : size * 0.15;
+  const genSp = expMed ? Math.max(size * 0.08, Math.min(expMed * 0.4, size * 0.2)) : size * 0.08;
   for (let i = 0; i < gs.length; i++) {
     const g = gs[i];
     if (i > 0) {
@@ -748,7 +1068,17 @@ function makeLine(seg, page, spaceGlyphs) {
       const between = spaces.filter((s) => s.x0 >= p.x1 - 1 && s.x1 <= g.x0 + 1 && s.x0 < g.x0);
       const explicit = between.some((s) => !s.generated);
       const generated = between.some((s) => s.generated);
-      const isSp = explicit || gap - base > size * 0.15 || (generated && gap - base > size * 0.08);
+      // PDFium 이 만든 공백(generated)은 실제 공백이 있는 줄에서는 그 공백 틈의 60%는 넘어야 믿는다
+      // (낱말 안에도 만들어 넣었다: "t ake")
+      // 엄격한 기준은 라틴 글자 두 개 사이(영어 낱말 안)에만 — 한국어·기호 옆 띄어쓰기는 종전 기준
+      const latin = isLatin(p.c) && isLatin(g.c);
+      // 영어 축약형("I'm", "it's"): 알파벳 뒤 아포스트로피에 바로 알파벳이 붙으면 실제 공백 글자나 확실히 넓은 틈(글자 크기 30%)일 때만
+      // 띄운다. PDFium 이 그 틈에 공백을 만들어 넣어 "I 'm", "it 's" 가 됐다(가사 PDF 105줄)
+      const nx = gs[i + 1];
+      const contraction = isLatin(p.c) && /['’]/.test(g.c) && nx && isLatin(nx.c) && nx.x0 - g.x1 < size * 0.15;
+      // 옮겨 붙인 장식 첫·끝 글자(BERLIN 의 B·N)는 낱말의 일부 — 실제 공백 글자가 있을 때만 띄운다(상자 위치가 어긋난 글꼴이 많다)
+      const isSp = (g._bigJoin || p._bigJoin) ? explicit : contraction ? explicit || gap - base > Math.max(geomSp, size * 0.3)
+        : explicit || gap - base > (latin ? geomSp : size * 0.15) || (generated && gap - base > (latin ? genSp : size * 0.08));
       gaps.push({ gap, isSp });
       if (isSp) text += " ";
       gaps[gaps.length - 1].at = text.length;      // 이 틈 바로 뒤 글자의 위치(텍스트 기준)
@@ -767,7 +1097,7 @@ function makeLine(seg, page, spaceGlyphs) {
   const symbolBullet = gs.length > 1 && SYMBOL_FONT.test(gs[0].font || "") && !SYMBOL_FONT.test(gs[1].font || "") && gs[1].x0 - gs[0].x1 > size * 0.3;
   if (symbolBullet) contentStart = gs[1].x0;
   return {
-    symbolBullet,
+    symbolBullet, spanTitle: seg.spanTitle || undefined,
     page: page.index, group: `${page.index}:${seg.section}:${seg.col}:${seg.panel ?? -1}${seg.cell ? ":" + seg.cell.id : ""}`, contentStart, panel: seg.panel ?? -1,
     cell: seg.cell ? { table: `p${page.index}-t${seg.cell.t}`, row: seg.cell.r, col: seg.cell.c } : null,
     glyphs: gs, text, gaps, trailingSpace,
@@ -779,16 +1109,41 @@ function makeLine(seg, page, spaceGlyphs) {
 }
 
 // ───────── 머리글/꼬리글/쪽번호 ─────────
+// 두 쪽의 본문(위·아래 12% 밖) 줄이 같은 자리·같은 글로 3줄 이상 겹치는가 — 같은 내용을 되풀이한 쪽
+const dupCache = new WeakMap();
+function duplicatePages(a, b, all) {
+  let m = dupCache.get(all);
+  if (!m) dupCache.set(all, (m = new Map()));
+  const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+  if (!m.has(key)) {
+    const body = (p) => all.filter((l) => l.page === p && l.oy >= l.pageH * 0.12 && l.oy <= l.pageH * 0.88);
+    const B = body(b);
+    let n = 0;
+    for (const l of body(a)) if (l.text.length >= 4 && B.some((q) => Math.abs(q.oy - l.oy) < 8 && q.text === l.text)) n++;
+    m.set(key, n >= 3);
+  }
+  return m.get(key);
+}
+
 function isFurniture(l, pages, all, bodySize) {
   const inTop = l.oy < l.pageH * 0.12, inBottom = l.oy > l.pageH * 0.88;
   if (!inTop && !inBottom) return false;
   const norm = l.text.replace(/\d+/g, "#").trim();
   // 쪽번호: "3", "- 3 -", "3 / 10", "iv"
   if (/^[#\s\-–—/|.·()]*$/.test(norm) || /^[ivxlcdm]+$/i.test(l.text.trim())) return true;
+  // 글상자(카드) 안의 줄은 머리글이 아니다: 쪽마다 같은 자리에 놓인 핸드아웃 카드의 "HandOut" 제목이
+  // 여러 쪽에 반복된다는 이유로 머리글로 빠져, 어떤 카드 표에는 제목이 있고 어떤 카드에는 없었다
+  // 카드 크기의 상자만(높이 6줄·너비 8글자 이상, 쪽 넓이 40% 이하) — 글자 뒤에 깐 작은 바탕·제목 칸을 지나는 시험지 머리글
+  // ("(화법과 작문) 홀수형")까지 살아나면 안 된다
+  const cx = (l.x0 + l.x1) / 2, pg = pages[l.page];
+  if ((pg?._regions || []).some((r) => r.kind === "panel" && cx > r.bbox[0] && cx < r.bbox[2] && l.oy > r.bbox[1] && l.oy - l.size < r.bbox[3]
+    && r.bbox[3] - r.bbox[1] >= l.size * 6 && r.bbox[2] - r.bbox[0] >= l.size * 8
+    && (r.bbox[2] - r.bbox[0]) * (r.bbox[3] - r.bbox[1]) <= pg.width * pg.height * 0.4)) return false;
   // 여러 쪽에 같은 위치·같은 내용으로 반복되는 줄
+  // 단, 본문까지 같은 쪽(같은 내용을 되풀이한 필사 연습장 등)과 겹치는 것은 머리글의 증거가 아니다
   if (pages.length >= 2) {
     const same = all.filter((m) => m !== l && m.page !== l.page && Math.abs(m.oy - l.oy) < 8
-      && m.text.replace(/\d+/g, "#").trim() === norm).length;
+      && m.text.replace(/\d+/g, "#").trim() === norm && !duplicatePages(l.page, m.page, all)).length;
     if (same >= 1) return true;
   }
   // 한 쪽짜리라도 위쪽 여백의 작은 글씨는 머리글로 본다(아래쪽은 각주일 수 있어 제외)
@@ -875,7 +1230,8 @@ function lastToken(l) { return l.text.split(" ").at(-1); }
 function glyphWidth(g) { return Math.max(0, g.x1 - g.x0); }
 
 // 단 가운데에 맞춰 놓인 줄(인용문, 제목)
-const centered = (l) => l.x0 - l.L > l.size && l.R - l.x1 > l.size && Math.abs((l.x0 + l.x1) / 2 - (l.L + l.R) / 2) < l.size * 0.6;
+const centered = (l) => l.spanTitle || (l.axis != null && Math.abs((l.x0 + l.x1) / 2 - l.axis) < l.size * 0.6)
+  || (l.x0 - l.L > l.size && l.R - l.x1 > l.size && Math.abs((l.x0 + l.x1) / 2 - (l.L + l.R) / 2) < l.size * 0.6);
 // 본문보다 큰(작은) 글자가 이어지면 줄 간격도 그 비율만큼 넓다(좁다)
 function expectPitch(prev, cur, bodySize) {
   const same = Math.abs(prev.size - cur.size) < 0.5;
@@ -890,6 +1246,12 @@ function localPitch(prev, cur, next, prevprev, bodySize) {
   if (ok(cur, next)) nb.push(next.oy - cur.oy);
   return nb.length ? Math.max(base, Math.min(...nb)) : base;
 }
+// 같은 구역의 오른쪽 단이 왼쪽 단 첫 줄보다 확실히 아래에서 시작하면 이어지는 단이 아니라 나란히 놓인 별개의 글이다
+function sideBySide(prev, cur) {
+  const [pp, ps, pc, pk] = String(prev.group).split(":"), [cp, cs, cc, ck] = String(cur.group).split(":");
+  if (pp !== cp || ps !== cs || pk !== ck || !(+cc > +pc)) return false;
+  return cur.groupTop > prev.groupTop + cur.size * 0.9 && cur.oy <= prev.oy + cur.size * 0.5;
+}
 function analyzePair(prev, cur, next, bodySize, spaceW, prevprev) {
   const reasons = [];
   let structuralBreak = null;
@@ -902,6 +1264,9 @@ function analyzePair(prev, cur, next, bodySize, spaceW, prevprev) {
   else if (TOC_LINE.test(prev.text)) structuralBreak = "목차 항목 끝(점선 + 쪽 번호)";
   else if (prev.panel !== cur.panel && prev.page === cur.page) structuralBreak = "상자(사이드바) 경계";
   else if (prev.rotated || cur.rotated) structuralBreak = "회전된 글씨";
+  else if (!sameGroup && prev.page === cur.page && END_PUNCT.test(prev.text) && sideBySide(prev, cur)) structuralBreak = "나란한 글 덩이(옆 단이 앞 단보다 아래에서 시작)";
+  // 단 흐름이 바뀌면서(구역·단 경계) 아래로 두 줄 넘게 떨어진 줄: 이어지는 단은 위로 올라가므로 이것은 새 덩이
+  else if (!sameGroup && prev.page === cur.page && cur.oy - prev.oy > Math.max(prev.size, cur.size) * 2.2) structuralBreak = "구역 사이 간격 벌어짐";
   if (structuralBreak) return { prev, cur, structuralBreak, slack: 0, firstCharW: 0, firstTokW: 0, reasons, sameGroup, missingSuspect: false };
 
   if (Math.abs(cur.size - prev.size) > Math.max(prev.size, cur.size) * 0.12) structuralBreak = "글자 크기 변화";
@@ -930,7 +1295,8 @@ function analyzePair(prev, cur, next, bodySize, spaceW, prevprev) {
     } else if (ind > cur.size * 0.6 && !alignedWithPrev && !cur.tableGroup && !(centered(prev) && centered(cur))
       && !(nextInd > cur.size * 0.6 && Math.abs(nextInd - ind) < cur.size * 0.3)) structuralBreak = "첫 줄 들여쓰기";
     else if ((cur.symbolBullet || BULLET.test(firstToken(cur)) || BULLET_CHARS.test(cur.glyphs[0].c)) && cur.text.includes(" ")
-      && (END_PUNCT.test(prev.text) || prev.text.endsWith(":") || prev.R - prev.natEnd > cur.size * 2)) structuralBreak = "글머리 기호/번호";
+      && (END_PUNCT.test(prev.text) || prev.text.endsWith(":") || prev.R - prev.natEnd > cur.size * 2
+        || sameListNext(firstToken(prev), firstToken(cur)))) structuralBreak = "글머리 기호/번호";
   }
 
   // 여유폭: 앞 줄이 (양쪽정렬을 되돌렸을 때) 오른쪽 끝까지 얼마나 비어 있었나
@@ -945,7 +1311,11 @@ function analyzePair(prev, cur, next, bodySize, spaceW, prevprev) {
   // 빠진 글자 의심: 같은 단, 줄 간격은 평소대로인데 앞 줄이 일찍 끝나고
   // 이 줄은 있어야 할 시작점보다 한참 오른쪽에서 시작 → 그 사이에 텍스트층에 없는 글자가 있다
   let missingSuspect = false;
-  if (sameGroup && !cur.wrapLeft && !prev.wrapRight && !prev.tableGroup && !(centered(prev) && centered(cur)) && cur.oy - prev.oy <= cur.pitch * 1.15 && cur.oy > prev.oy) {
+  // (본문보다 훨씬 큰 제목과 보통 크기 줄 사이는 제목과 부제 — 빠진 글자로 잇지 않는다: 속표지 "BERLIN" 117pt / "THE WICKED CITY" 30pt.
+  //  위첨자·동그라미 숫자 같은 작은 글자 줄은 그대로 빠진 글자 의심 대상)
+  if (sameGroup && !cur.wrapLeft && !prev.wrapRight && !prev.tableGroup && !(centered(prev) && centered(cur)) && cur.oy - prev.oy <= cur.pitch * 1.15 && cur.oy > prev.oy
+    && !(Math.max(cur.size, prev.size) > bodySize * 1.5 && Math.min(cur.size, prev.size) >= bodySize * 0.8
+      && Math.max(cur.size, prev.size) > Math.min(cur.size, prev.size) * 1.3)) {
     const anchor = Math.abs(prev.contentStart - prev.x0) > 0.1 ? prev.contentStart
       : prev.x0 - prev.L > prev.size * 0.3 ? prev.x0 : prev.L;
     // (빠진 글자가 앞 줄 끝에 있으면 앞 줄이 일찍 끝나고, 이 줄 앞머리에 있으면 이 줄이 안쪽에서 시작한다)
@@ -980,6 +1350,16 @@ function decideJoin(p, mode, spaceW, dict, spaceRatio, o) {
   } else if (prev.tableGroup) {
     reasons.push("표/목차 칸 안에서 이어지는 줄");
   } else if (centered(prev) && centered(cur)) {
+    // 가운데 정렬된 짧은 줄(단 폭의 80% 미만)은 일부러 줄을 바꾼 것(♬ 배경 / ♬ 인원 … 같은 소개 목록, 시)이라 나눈다.
+    // 본문보다 큰 여러 줄 제목(headingPair)만 종전대로 이어 붙인다.
+    // 다음 줄 첫 낱말이 앞 줄 남은 자리에 넉넉히 들어갈 수 있었는데도 줄을 바꿨을 때만이다(칸·단 폭에 밀려 넘어간 줄은 잇는다).
+    // 쓸 수 있는 폭: 단 폭과 이 덩이에서 가장 긴 줄 중 큰 쪽(가운데 정렬 글은 L·R 밖으로 나가는 긴 줄이 있다)
+    const room = Math.max(prev.R - prev.L, prev.groupMaxW || 0) - (prev.x1 - prev.x0);
+    // 여러 줄 제목도 같다: 가운데 정렬 제목의 줄바꿈("Call Of Cthulhu 7th Fan Made Scenario / W. PHwa")은 원본대로 둔다.
+    if (room > firstTokW + prev.size) {
+      reasons.push("가운데 정렬된 짧은 줄 — 일부러 줄을 바꿈");
+      return mk("para", 0.85);
+    }
     reasons.push("가운데 정렬된 줄끼리 — 줄 길이로 문단 끝을 판단하지 않음");
   } else if (p.headingPair && !END_PUNCT.test(prev.text)) {
     reasons.push("여러 줄 제목 — 제목은 일부러 짧게 끊으므로 줄 길이로 문단 끝을 판단하지 않음");

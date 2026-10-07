@@ -17,22 +17,22 @@ function flattenTabs(tabs, out = []) { for (const t of tabs || []) { out.push(t)
 export async function docsToModel(doc, fetchImage) {
   let flat = flattenTabs(doc.tabs);
   if (!flat.length) flat = [{ tabProperties: { title: doc.title }, documentTab: { body: doc.body, inlineObjects: doc.inlineObjects, documentStyle: doc.documentStyle } }];
-  const tabs = [];
-  for (const t of flat) {
+  // 탭과 그 안의 블록은 서로 독립적이다. 순서는 Promise.all이 보존하므로 그림 다운로드만 병렬화한다.
+  const tabs = await Promise.all(flat.map(async (t, index) => {
     const dt = t.documentTab || {};
     const blocks = await contentToBlocks((dt.body && dt.body.content) || [], dt.inlineObjects || {}, fetchImage);
-    tabs.push({ name: (t.tabProperties && t.tabProperties.title) || `탭 ${tabs.length + 1}`, blocks });
-  }
+    return { name: (t.tabProperties && t.tabProperties.title) || `탭 ${index + 1}`, blocks };
+  }));
   const mode = flat[0].documentTab && flat[0].documentTab.documentStyle && flat[0].documentTab.documentStyle.documentFormat && flat[0].documentTab.documentStyle.documentFormat.documentMode;
   return { tabs, pageless: mode ? mode === "PAGELESS" : null };
 }
 
 async function contentToBlocks(content, inlineObjects, fetchImage) {
-  const blocks = [];
-  for (const el of content || []) {
-    if (el.paragraph) blocks.push(await paragraphBlock(el.paragraph, inlineObjects, fetchImage));
-    else if (el.table) blocks.push(await tableBlock(el.table, inlineObjects, fetchImage));
-  }
+  const blocks = (await Promise.all((content || []).map((el) => {
+    if (el.paragraph) return paragraphBlock(el.paragraph, inlineObjects, fetchImage);
+    if (el.table) return tableBlock(el.table, inlineObjects, fetchImage);
+    return null;
+  }))).filter(Boolean);
   // 문서 끝의 빈 문단 하나(Google 문서는 늘 끝에 빈 문단이 있다)는 뺀다
   while (blocks.length && blocks.at(-1).t === "p" && !blocks.at(-1).runs.length) blocks.pop();
   return blocks;
@@ -41,8 +41,7 @@ async function contentToBlocks(content, inlineObjects, fetchImage) {
 async function paragraphBlock(p, inlineObjects, fetchImage) {
   const ps = p.paragraphStyle || {};
   const named = NAMED_IN[ps.namedStyleType] || {};
-  const runs = [];
-  for (const e of p.elements || []) {
+  const chunks = await Promise.all((p.elements || []).map(async (e) => {
     if (e.textRun) {
       const ts = e.textRun.textStyle || {};
       const fmt = {
@@ -51,20 +50,24 @@ async function paragraphBlock(p, inlineObjects, fetchImage) {
         font: ts.weightedFontFamily && ts.weightedFontFamily.fontFamily ? ts.weightedFontFamily.fontFamily : null,
       };
       const parts = String(e.textRun.content || "").replace(/\n$/, "").split("\u000b");   // \u000b = 줄바꿈(Shift+Enter)
-      parts.forEach((t, k) => { if (k) runs.push({ br: true }); if (t) runs.push({ text: t, ...fmt }); });
+      const out = [];
+      parts.forEach((t, k) => { if (k) out.push({ br: true }); if (t) out.push({ text: t, ...fmt }); });
+      return out;
     } else if (e.inlineObjectElement && fetchImage) {
       const obj = inlineObjects[e.inlineObjectElement.inlineObjectId];
       const em = obj && obj.inlineObjectProperties && obj.inlineObjectProperties.embeddedObject;
       const uri = em && em.imageProperties && em.imageProperties.contentUri;
-      if (!uri) continue;
+      if (!uri) return [];
       try {
         const img = await fetchImage(uri);
         const w = em.size && em.size.width ? Math.round(em.size.width.magnitude * PT_PX) : 0;
         const h = em.size && em.size.height ? Math.round(em.size.height.magnitude * PT_PX) : 0;
-        if (img) runs.push({ img: { mime: img.mime, b64: img.b64, w, h } });
+        return img ? [{ img: { mime: img.mime, b64: img.b64, w, h } }] : [];
       } catch { /* 받지 못한 그림은 건너뛴다 */ }
     }
-  }
+    return [];
+  }));
+  const runs = chunks.flat();
   return { t: "p", align: ALIGN_IN[ps.alignment] || "left", heading: named.heading || 0, style: named.style || null, runs };
 }
 

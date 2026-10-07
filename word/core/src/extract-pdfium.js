@@ -4,9 +4,45 @@
 // 이 파일만 PDF 엔진에 의존한다. reconstruct.js 는 여기서 나온 glyph 배열만 본다.
 
 import { PDFiumLibrary } from "@hyzyla/pdfium";
-import { readPageObjects } from "./extract-objects.js";
+import { readPageObjects, pageOrigin } from "./extract-objects.js";
 
 let libPromise = null;
+// 스몰캡·대문자 전용 글꼴(제목용 장식 글꼴 등): 소문자 코드에 대문자 모양을 그린다. 글자층에는 소문자로 남아
+// "BERLIN THE WICKED CITY" 가 "the wicked city" 로 나왔다. 글꼴의 글자 윤곽선(FPDFFont_GetGlyphPath)으로
+// 위로 솟는 소문자(b d f h k l t)와 x 높이 소문자(a c e m n o r s u v w x z)의 윗선을 견주어, 거의 같으면
+// (보통 글꼴은 0.6~0.8배) 대문자로 바꾼다. 글자 상자(GetCharBox)는 많은 글꼴에서 모든 글자에 같은 높이를 돌려줘 쓸 수 없다.
+const ASC = /[bdfhklt]/, XH = /[acemnorsuvwxz]/;
+function glyphTop(M, font, ch, buf) {
+  const path = M._FPDFFont_GetGlyphPath(font, ch.codePointAt(0), 1);
+  if (!path) return null;
+  const n = M._FPDFGlyphPath_CountGlyphSegments(path);
+  let top = -Infinity, bot = Infinity;
+  for (let i = 0; i < n; i++) {
+    const seg = M._FPDFGlyphPath_GetGlyphPathSegment(path, i);
+    if (seg && M._FPDFPathSegment_GetPoint(seg, buf, buf + 4)) { const y = M.HEAPF32[(buf >> 2) + 1]; if (y > top) top = y; if (y < bot) bot = y; }
+  }
+  return n > 0 && top > bot ? top : null;
+}
+function capsFontsOf(M, fontUse, buf) {
+  const caps = new Set(), med = (a) => { const b = [...a].sort((x, y) => x - y); return b[b.length >> 1]; };
+  for (const [name, e] of fontUse) {
+    const f = M._FPDFTextObj_GetFont(e.obj);
+    if (!f) continue;
+    const asc = [], xh = [];
+    for (const ch of e.chars) {
+      if (!ASC.test(ch) && !XH.test(ch)) continue;
+      const t = glyphTop(M, f, ch, buf);
+      if (t == null || !(t > 0)) continue;
+      (ASC.test(ch) ? asc : xh).push(t);
+    }
+    // 대문자형이면 소문자 윗선이 모두 고르다(한 높이, 둥근 글자의 넘침 정도만 차이). 기호를 알파벳 자리에 넣은
+    // 수식 글꼴(exam_math)은 높이가 제각각이라 빠진다. 윗선은 글꼴 크기(1) 대비 대문자 높이 범위(0.5~0.9) — x 높이(0.4~0.45)에 머무는 수식 글꼴은 빠진다.
+    const all = [...asc, ...xh], even = Math.max(...all) <= Math.min(...all) * 1.12;
+    if (asc.length >= 1 && xh.length >= 2 && med(xh) >= med(asc) * 0.9 && even && med(all) >= 0.5 && med(all) <= 0.9) caps.add(name);
+  }
+  return caps;
+}
+
 export function getLibrary() {
   if (!libPromise) libPromise = PDFiumLibrary.init();
   return libPromise;
@@ -22,32 +58,84 @@ export function getLibrary() {
  *   x0..y1 : loose box(폰트 ascent~descent 기준, 줄 묶기에 안정적)
  *   ox, oy : 글자 원점(베이스라인)
  */
+/** 쪽 닫기. 래퍼(@hyzyla/pdfium)의 getPage 는 쪽을 열기만 하고 render() 때만 닫는다 — 글자·개체만 읽은 쪽은
+ *  문서를 닫아도 pdfium(wasm) 메모리에 남아, PDF 를 열고 닫을수록 메인 프로세스가 커졌다(같은 쪽을 다시 열 때마다 또). */
+export function closePage(page) {
+  try { page.module._FPDF_ClosePage(page.pageIdx); } catch { /* 이미 닫힘 */ }
+}
+/** 쪽 n 을 열어 fn(page) 를 하고 닫는다(fn 이 약속을 돌려주면 끝난 뒤에) */
+export function withPage(doc, n, fn) {
+  const page = doc.getPage(n);
+  let r;
+  try { r = fn(page); } catch (e) { closePage(page); throw e; }
+  if (r && typeof r.then === "function") return r.finally(() => closePage(page));
+  closePage(page);
+  return r;
+}
+
 export async function extractGlyphs(bytes, opts = {}) {
   const lib = await getLibrary();
   const doc = await lib.loadDocument(bytes);
   const pages = [];
   try {
     let pageNo = 0;
-    for (const page of doc.pages()) {
+    const total = doc.getPageCount();
+    for (const page of doc.pages()) try {
+      opts.onPage?.(pageNo, total);                                  // 진행 표시(읽은 쪽 수)
       if (opts.yieldEvery && ++pageNo % opts.yieldEvery === 0) await new Promise((r) => setImmediate(r));
-      const p = readPage(page);
       // 이미지·선 개체의 위치(그림 파일은 문서화·끌어놓기에서 요청할 때 session.js 가 꺼낸다)
-      const { images, paths } = readPageObjects(page);
+      const { images, paths, textSeq } = readPageObjects(page);
+      const p = readPage(page, textSeq);
+      // 보이지 않는 글자·선은 없는 것으로 본다(문서화·표 찾기·글자 층 모두):
+      //  - 쪽 밖(재단선 밖·펼침 표지의 뒤표지 쪽)에 있는 글자
+      //  - 쪽의 40% 이상을 덮는 불투명한 그림보다 먼저 그려져 그 밑에 가려진 글자·선(표지 그림 밑에 깔린 글 등)
+      //    작은 그림은 보지 않는다: PDFium 이 불투명하다고 알려 줘도 실제로는 투명한 곳이 있어 밑의 글자가 보이는
+      //    아이콘이 있다(괄호 글자 위에 얹힌 16pt 아이콘 — 80168_regulatory_analysis 예제).
+      const area = (b) => Math.max(0, Math.min(p.width, b[2]) - Math.max(0, b[0])) * Math.max(0, Math.min(p.height, b[3]) - Math.max(0, b[1]));
+      const covers = images.filter((im) => !im.hasAlpha && area(im.bbox) >= p.width * p.height * 0.4).map((im) => ({ b: im.bbox, seq: im.seq }));
+      const hidden = (x, y, seq) => seq >= 0 && covers.some((c) => c.seq > seq && x > c.b[0] && x < c.b[2] && y > c.b[1] && y < c.b[3]);
+      p.glyphs = p.glyphs.filter((g) => {
+        const x = (g.x0 + g.x1) / 2, y = (g.y0 + g.y1) / 2;
+        return x >= 0 && x <= p.width && y >= 0 && y <= p.height && !hidden(x, y, g.seq);
+      });
       p.images = images.map(({ _obj, _m, ...img }) => img);
-      p.paths = paths;
+      p.paths = paths.filter((pa) => {
+        const x = (pa.bbox[0] + pa.bbox[2]) / 2, y = (pa.bbox[1] + pa.bbox[3]) / 2;
+        return x >= 0 && x <= p.width && y >= 0 && y <= p.height && !hidden(x, y, pa.seq);
+      });
       pages.push(p);
-    }
+    } finally { closePage(page); }
   } finally {
     doc.destroy();
   }
   return { pages };
 }
 
-function readPage(page) {
+// 장식 기호 글꼴(Wingdings·Webdings·ZapfDingbats·…Ornaments 등)은 알파벳 자리에 그림 기호가 들어 있다. 글자 코드대로 읽으면
+// 글머리표가 "G 1단계"처럼 엉뚱한 알파벳이 된다(테스트2 Cristoforo-Ornaments). 대응표가 알려진 글꼴은 그 기호로,
+// 모르는 장식 글꼴은 장식 기호(❧)로, 그 밖의 기호 글꼴은 글머리 점(•)으로 바꾼다. 이미 기호로 읽힌 글자(유니코드 기호)는 그대로.
+const SYMBOL_FONT = /ornament|dingbat|wingding|webding|zapf|fleuron|bullets?\b/i;
+const WINGDINGS = { '"': "✂", "#": "✁", "(": "☎", ")": "✆", "*": "✉", ",": "📪", "-": "📫", l: "●", n: "■", o: "□", q: "❑", u: "◆", v: "❖", w: "⬥", "§": "▪", "Ø": "➢", "ü": "✓", "û": "✗", "ý": "☒", "þ": "☑", "¨": "◻", J: "☺", L: "☹", F: "☞", "à": "➔", "è": "➡" };
+const ZAPF = { l: "●", n: "■", o: "❏", q: "❑", u: "◆", H: "★", I: "✩", s: "▲", t: "▼", "3": "✓", "4": "✔", "7": "✗", "8": "✘", "+": "☛" };
+function symbolFontChar(font, c) {
+  if (!SYMBOL_FONT.test(font) || !c || /\s/.test(c)) return c;
+  let code = c.codePointAt(0);
+  if (code >= 0xf020 && code <= 0xf0ff) code -= 0xf000;       // 기호 글꼴의 사용자 영역(U+F0xx)으로 읽힌 경우
+  if (code < 0x21 || code > 0xff) return c;                    // 이미 유니코드 기호(■, ❧ 등)
+  const ch = String.fromCharCode(code);
+  if (/wingding/i.test(font) && WINGDINGS[ch]) return WINGDINGS[ch];
+  if (/zapf|dingbat/i.test(font) && ZAPF[ch]) return ZAPF[ch];
+  return /ornament|fleuron/i.test(font) ? "❧" : "•";
+}
+
+function readPage(page, textSeq = new Map()) {
   const M = page.module;            // emscripten 모듈 (래퍼가 타입만 숨겨 둔 것)
+  const fontUse = new Map();        // 글꼴 이름 → { obj: 그 글꼴의 글자 개체, chars: 이 쪽에 나온 소문자 }
   const h = page.pageIdx;           // FPDF_PAGE 핸들
   const W = M._FPDF_GetPageWidth(h);
   const H = M._FPDF_GetPageHeight(h);
+  // 글자 좌표도 보이는 영역(CropBox) 기준으로(extract-objects.js pageOrigin 참고)
+  const { x: OX, top: OT } = pageOrigin(page);
   const tp = M._FPDFText_LoadPage(h);
   if (!tp) throw new Error("text page load failed");
 
@@ -67,7 +155,7 @@ function readPage(page) {
       // 무엇인지 모르므로 U+FFFD(�)로 자리를 표시하고 unreadable 로 남긴다.
       const unreadable = code === 0 && !generated;
       if (code === 0 && generated) continue;
-      const c = unreadable ? "\ufffd" : String.fromCodePoint(code);
+      let c = unreadable ? "\ufffd" : String.fromCodePoint(code);
 
       // PDFium이 만들어 넣은 줄바꿈 문자는 버린다(줄은 우리가 직접 판정).
       if (c === "\r" || c === "\n") continue;
@@ -77,7 +165,7 @@ function readPage(page) {
       if (M._FPDFText_GetLooseCharBox(tp, i, buf)) {
         const f = M.HEAPF32, k = buf >> 2;
         const L = f[k], T = f[k + 1], R = f[k + 2], B = f[k + 3];
-        x0 = L; x1 = R; y0 = H - T; y1 = H - B;
+        x0 = L - OX; x1 = R - OX; y0 = OT - T; y1 = OT - B;
       } else {
         continue;
       }
@@ -86,7 +174,7 @@ function readPage(page) {
       let ox = x0, oy = y1;
       if (M._FPDFText_GetCharOrigin(tp, i, buf, buf + 8)) {
         const d = M.HEAPF64, k = buf >> 3;
-        ox = d[k]; oy = H - d[k + 1];
+        ox = d[k] - OX; oy = OT - d[k + 1];
       }
 
       // 글꼴 크기 × 글자 행렬의 확대 비율 = 실제로 보이는 크기.
@@ -127,11 +215,13 @@ function readPage(page) {
         if (n2 > 1) font = new TextDecoder().decode(M.HEAPU8.subarray(fontBuf, fontBuf + n2 - 1));
       }
       font = font.replace(/^[A-Z]{6}\+/, "");   // 서브셋 접두어(ABCDEF+) 제거
+      c = symbolFontChar(font, c);               // 장식 기호 글꼴의 알파벳 자리 글자 → 기호
       // 보이지 않게 그려지는 글자(그리기 방식 3·7): 스캔본·이미지 위에 깔린 검색용 글자 층 → 이미지의 일부로 본다
       const tobj = M._FPDFText_GetTextObject(tp, i);
       const rmode = tobj ? M._FPDFTextObj_GetTextRenderMode(tobj) : 0;
       const invisible = rmode === 3 || rmode === 7;
-      const weight = M._FPDFText_GetFontWeight(tp, i);
+      // 채우기 + 테두리(그리기 방식 2·6)로 그린 글자는 가짜 굵게(한글 워드프로세서가 굵은 글꼴 없이 굵게 할 때)
+      const weight = rmode === 2 || rmode === 6 ? Math.max(700, M._FPDFText_GetFontWeight(tp, i)) : M._FPDFText_GetFontWeight(tp, i);
       let color = null;
       if (M._FPDFText_GetFillColor(tp, i, buf, buf + 4, buf + 8, buf + 12)) {
         const u = M.HEAPU32, k = buf >> 2;
@@ -150,9 +240,17 @@ function readPage(page) {
       const hyphen = M._FPDFText_IsHyphen(tp, i) === 1;
       const unicodeError = M._FPDFText_HasUnicodeMapError(tp, i) === 1;
 
-      glyphs.push({ c, x0, y0, x1, y1, ox, oy, size, font, weight, angle, italic, skew, rawBox, color, hscale, invisible, ci: i,
+      const seq = tobj && textSeq.has(tobj) ? textSeq.get(tobj) : -1;   // 그려지는 순서(모르면 -1: 가려짐 판단 안 함)
+      if (tobj && /[a-z]/.test(c)) {        // 글꼴별로 이 쪽에 나온 소문자(대문자형 글꼴 찾기용)
+        let e = fontUse.get(font); if (!e) fontUse.set(font, (e = { obj: tobj, chars: new Set() }));
+        e.chars.add(c);
+      }
+      glyphs.push({ c, x0, y0, x1, y1, ox, oy, size, font, weight, angle, italic, skew, rawBox, color, hscale, invisible, ci: i, seq,
                     generated, hyphen, unicodeError: unicodeError || unreadable, unreadable });
     }
+    // 대문자형 글꼴의 소문자는 대문자로(글꼴 개체가 살아 있는 동안 윤곽선을 읽는다)
+    const caps = fontUse.size ? capsFontsOf(M, fontUse, buf) : null;
+    if (caps?.size) for (const g of glyphs) if (caps.has(g.font) && /[a-z]/.test(g.c)) { g.c = g.c.toUpperCase(); g.capsFont = true; }
   } finally {
     free(buf); free(fontBuf);
     M._FPDFText_ClosePage(tp);

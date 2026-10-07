@@ -26,14 +26,19 @@ const MIME = {
   folder: "application/vnd.google-apps.folder", gdoc: "application/vnd.google-apps.document", pdf: "application/pdf",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 };
-/** 드라이브 파일 종류: folder / gdoc / pdf / docx / hwp / 그 밖(null) */
+// 서브뷰가 여는 그 밖의 문서(받은 그대로 화면에서 한글 문서로 바꾼다 — renderer/doc-import.js)
+const OTHER_DOC = /\.(odt|rtf|txt|md|markdown|html?|xhtml|epub|csv|tsv|xlsx|pptx)$/;
+const OTHER_MIME = /^(text\/(plain|markdown|html|csv|tab-separated-values|rtf)|application\/(rtf|epub\+zip|vnd\.oasis\.opendocument\.text|vnd\.openxmlformats-officedocument\.(spreadsheetml\.sheet|presentationml\.presentation)))$/;
+/** 드라이브 파일 종류: folder / gdoc / pdf / docx / hwp / gexport(Google 스프레드시트·프레젠테이션 → PDF 로 받기) / file(그 밖의 문서) / 그 밖(null) */
 export function driveKind(f) {
   const name = String(f.name || "").toLowerCase(), m = String(f.mimeType || "").toLowerCase();
   if (m === MIME.folder) return "folder";
   if (m === MIME.gdoc) return "gdoc";
+  if (m === "application/vnd.google-apps.spreadsheet" || m === "application/vnd.google-apps.presentation") return "gexport";
   if (m === MIME.pdf || name.endsWith(".pdf")) return "pdf";
   if (m === MIME.docx || name.endsWith(".docx")) return "docx";
   if (/\.(hwp|hwpx)$/.test(name) || /hwp|hancom|haansoft/.test(m)) return "hwp";
+  if (OTHER_DOC.test(name) || OTHER_MIME.test(m)) return "file";
   return null;
 }
 const b64url = (buf) => Buffer.from(buf).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -118,6 +123,12 @@ export class GoogleDocs {
   }
   async accessToken() {
     if (this.access && this.access.expires > Date.now()) return this.access.token;
+    // 미리 받기(warm)와 목록·받기 요청이 겹치면 갱신 요청을 한 번만 보내고 같이 기다린다
+    if (this.refreshing) return this.refreshing;
+    this.refreshing = this.refreshAccess().finally(() => { this.refreshing = null; });
+    return this.refreshing;
+  }
+  async refreshAccess() {
     if (!this.state.refreshToken) throw new Error("Google 에 연결되어 있지 않습니다. 환경 설정 → Google 드라이브 연결에서 연결해 주세요.");
     try {
       const tok = await this.tokenRequest({ grant_type: "refresh_token", refresh_token: this.state.refreshToken });
@@ -208,22 +219,51 @@ export class GoogleDocs {
     return { files, nextPageToken: j.nextPageToken || "" };
   }
   /** 파일 하나 가져오기: hwp·pdf·docx 는 원본, Google 문서는 Docs API 로 탭·본문·보기 방식을 직접 읽는다 */
-  async fetchFile(id) {
-    const meta = await (await this.api(`${EP.files}/${encodeURIComponent(id)}?fields=id,name,mimeType&supportsAllDrives=true`)).json();
-    const kind = driveKind(meta);
+  async fetchFile(id, known = null) {
+    // 파일 선택 창이 이미 내려받은 메타데이터를 재사용한다. 이전 호출 방식이나 직접 호출은
+    // 기존처럼 메타데이터를 조회하므로 호환성을 유지한다.
+    let meta = known && known.id === id && known.name && known.kind
+      ? { id, name: known.name, mimeType: known.mimeType || "", kind: known.kind }
+      : null;
+    if (!meta) meta = await (await this.api(`${EP.files}/${encodeURIComponent(id)}?fields=id,name,mimeType&supportsAllDrives=true`)).json();
+    const kind = meta.kind || driveKind(meta);
     if (!kind || kind === "folder") throw new Error("가져올 수 없는 파일입니다: " + meta.name);
     if (kind === "gdoc") {
       // 문서 API 로 탭 구조와 내용을 그대로 받는다(그림은 문서가 알려 주는 주소에서 받는다)
       const doc = await (await this.api(`${EP.docs}/${encodeURIComponent(id)}?includeTabsContent=true`)).json();
-      const fetchImage = async (uri) => {
-        const r = await this.api(uri);
-        const mime = (r.headers.get("content-type") || "image/png").split(";")[0];
-        return { mime, b64: Buffer.from(await r.arrayBuffer()).toString("base64") };
+      // 같은 그림이 여러 곳에서 쓰여도 한 번만 받고, 서로 다른 그림은 docsToModel에서 병렬로 받는다.
+      const imageCache = new Map();
+      let activeImages = 0;
+      const imageWaiters = [];
+      const withImageSlot = async (task) => {
+        if (activeImages >= 6) await new Promise((resolve) => imageWaiters.push(resolve));
+        activeImages++;
+        try { return await task(); }
+        finally { activeImages--; imageWaiters.shift()?.(); }
+      };
+      const fetchImage = (uri) => {
+        if (!imageCache.has(uri)) imageCache.set(uri, withImageSlot(async () => {
+          const r = await this.api(uri);
+          const mime = (r.headers.get("content-type") || "image/png").split(";")[0];
+          return { mime, b64: Buffer.from(await r.arrayBuffer()).toString("base64") };
+        }));
+        return imageCache.get(uri);
       };
       const model = await docsToModel(doc, fetchImage);
       return { kind: "model", name: meta.name, model: { title: meta.name, tabs: model.tabs }, pageless: model.pageless, source: "gdoc" };
     }
+    if (kind === "gexport") {
+      // Google 스프레드시트·프레젠테이션: 보이는 모양 그대로 PDF 로 받아 서브뷰 PDF 보기로 연다
+      const bytes = Buffer.from(await (await this.api(`${EP.files}/${encodeURIComponent(id)}/export?mimeType=application%2Fpdf`)).arrayBuffer());
+      return { kind: "pdf", name: meta.name.replace(/\.pdf$/i, "") + ".pdf", bytes, pageless: null, source: "gexport" };
+    }
     const bytes = Buffer.from(await (await this.api(`${EP.files}/${encodeURIComponent(id)}?alt=media&supportsAllDrives=true`)).arrayBuffer());
     return { kind, name: meta.name, bytes, pageless: null, source: kind };
+  }
+  /** 연결 토큰을 미리 받아 둔다(앱을 켤 때·드라이브 창을 열 때). 처음 목록·받기에서 토큰 갱신 왕복을 기다리지 않게 */
+  async warm() {
+    if (!this.state.refreshToken) return false;
+    await this.accessToken();
+    return true;
   }
 }

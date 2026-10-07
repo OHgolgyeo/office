@@ -1,14 +1,14 @@
 {
   "name": "ogolgye-word",
   "productName": "오골계 워드",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "HWP 편집기 + PDF 줄바꿈 복원 보기 (로컬 전용)",
   "author": "오골계 (@5golgyeo, https://x.com/5golgyeo)",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "main": "main.js",
   "scripts": {
-    "start": "electron .",
+    "start": "node scripts/start.js",
     "serve": "node server.js",
     "build-studio": "node scripts/build-studio.js",
     "get-model": "node scripts/get-kiwi-model.js",
@@ -17,7 +17,8 @@
     "check-api-tools": "node scripts/check-api-tools.js",
     "check-pdf-export": "electron scripts/check-pdf-export.js",
     "dist": "electron-builder --publish never",
-    "release": "electron-builder --publish always"
+    "release": "electron-builder --publish always",
+    "build-engine": "node scripts/build-engine.js"
   },
   "dependencies": {
     "@hyzyla/pdfium": "^2.1.13",
@@ -27,6 +28,7 @@
     "electron-updater": "^6.8.9",
     "jpeg-js": "^0.4.4",
     "kiwi-nlp": "^0.24.0",
+    "onnxruntime-node": "^1.30.0",
     "pngjs": "^7.0.0",
     "tar": "^7.5.22",
     "tesseract.js": "^6.0.1"
@@ -67,7 +69,12 @@
         }
       ],
       "icon": "build/icon.png",
-      "artifactName": "Ogolgye-Word-Setup-${version}.${ext}"
+      "artifactName": "Ogolgye-Word-Setup-${version}.${ext}",
+      "files": [
+        "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
+        "!node_modules/onnxruntime-node/bin/napi-v6/linux/**",
+        "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**"
+      ]
     },
     "nsis": {
       "oneClick": true,
@@ -96,7 +103,11 @@
       "icon": "build/icon.png",
       "category": "public.app-category.productivity",
       "identity": "-",
-      "artifactName": "Ogolgye-Word-${version}-mac-${arch}.${ext}"
+      "artifactName": "Ogolgye-Word-${version}-mac-${arch}.${ext}",
+      "files": [
+        "!node_modules/onnxruntime-node/bin/napi-v6/win32/**",
+        "!node_modules/onnxruntime-node/bin/napi-v6/linux/**"
+      ]
     },
     "dmg": {
       "artifactName": "Ogolgye-Word-${version}-mac-${arch}.${ext}"

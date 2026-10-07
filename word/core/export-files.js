@@ -96,12 +96,31 @@ function svgSize(svg) {
 }
 
 export function pdfPrintHtml(svgs) {
+  const { shell, pages } = pdfPrintParts(svgs);
+  return shell.replace("<body></body>", `<body>${pages.join("")}</body>`);
+}
+
+/** PDF 인쇄용 HTML 을 틀(쪽 크기 스타일, 빈 body)과 쪽 조각들로 나눠 준다.
+ *  그림이 많은 문서는 한 덩어리 HTML 이 수 MB 가 되어 data 주소(약 2MB 한도)나 파일로도 열리지 않았다 →
+ *  작은 틀을 먼저 열고 쪽 조각을 하나씩 붙인다(main.js pdfFromSvgs). */
+export function pdfPrintParts(svgs) {
   if (!Array.isArray(svgs) || !svgs.length) throw new Error("내보낼 쪽이 없습니다.");
-  const rules = [];
-  const pages = svgs.map((svg, index) => {
+  // 쪽 SVG 의 크기는 단위 없는 사용자 단위 = CSS px(엔진은 96dpi px, A4 = 793.7×1122.5). 예전에는 pt 로 써서 쪽이 1.33배 컸다.
+  // 같은 크기의 쪽은 쪽 설정(@page) 하나를 같이 쓴다. 예전에는 쪽마다 다른 이름(p0, p1 …)을 줘서, 이름이 바뀔 때의 강제
+  // 쪽 나눔과 break-after 가 겹쳐 쪽마다 빈 쪽이 하나씩 끼었다(6쪽 문서가 12쪽).
+  const rules = [], names = new Map();
+  const pages = svgs.map((svg) => {
     const { width, height } = svgSize(svg);
-    rules.push(`@page p${index}{size:${width}pt ${height}pt;margin:0}.p${index}{page:p${index};width:${width}pt;height:${height}pt}`);
-    return `<section class="page p${index}">${svg}</section>`;
-  }).join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="script-src 'none'"><style>${rules.join("")}*{box-sizing:border-box}html,body{margin:0;padding:0}.page{overflow:hidden;break-after:page}.page:last-child{break-after:auto}.page>svg{display:block;width:100%;height:100%}</style></head><body>${pages}</body></html>`;
+    const key = `${width}x${height}`;
+    if (!names.has(key)) {
+      const name = `p${names.size}`;
+      names.set(key, name);
+      rules.push(`@page ${name}{size:${width}px ${height}px;margin:0}.${name}{page:${name};width:${width}px;height:${Math.max(1, height - 1)}px}`);
+    }
+    return `<section class="page ${names.get(key)}">${String(svg).trim()}</section>`;
+  });
+  // 쪽 상자에 overflow:hidden 을 두면 Chromium 인쇄가 쪽마다 빈 쪽을 하나씩 더 만든다(실측: 3쪽 → 6쪽). 쪽 그림은 쪽 크기에
+  // 딱 맞으므로 넘칠 것이 없어 두지 않는다.
+  const shell = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="script-src 'none'"><style>${rules.join("")}*{box-sizing:border-box}html,body{margin:0;padding:0}.page{break-after:page}.page:last-child{break-after:auto}.page>svg{display:block;width:100%;height:100%}</style></head><body></body></html>`;
+  return { shell, pages };
 }

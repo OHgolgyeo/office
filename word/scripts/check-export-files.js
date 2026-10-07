@@ -32,7 +32,9 @@ const pdfHtml = pdfPrintHtml([
   '<svg viewBox="0 0 612 792"><text>첫 쪽</text></svg>',
   '<svg width="595" height="842"><text>둘째 쪽</text></svg>',
 ]);
-assert.match(pdfHtml, /@page p0\{size:612pt 792pt/);
-assert.match(pdfHtml, /@page p1\{size:595pt 842pt/);
+// 쪽 크기는 SVG 사용자 단위 = CSS px(엔진은 96dpi px). 크기가 같은 쪽은 쪽 설정 하나를 같이 쓴다
+assert.match(pdfHtml, /@page p0\{size:612px 792px/);
+assert.match(pdfHtml, /@page p1\{size:595px 842px/);
+assert.doesNotMatch(pdfHtml, /overflow:hidden/);   // 두면 Chromium 인쇄가 쪽마다 빈 쪽을 하나씩 더 만든다
 assert.equal((pdfHtml.match(/<section class="page/g) || []).length, 2);
 console.log("HTML ZIP 및 PDF 인쇄 문서 검사 통과");

@@ -27,7 +27,11 @@ async function worker(langDir, languages) {
     workerKey = key;
     workerP = (async () => {
     const { createWorker, PSM } = await import("tesseract.js");
-    const w = await createWorker(langs, 1, { langPath: langDir, gzip: false, cachePath: path.join(os.tmpdir(), "ogolgye-ocr"), workerPath, logger: () => {} });
+    // errorHandler: 주지 않으면 작업자 쪽 오류를 tesseract.js 가 메시지 처리기 안에서 던져, 잡을 수 없는 예외가 되어 앱에
+    // "A JavaScript error occurred in the main process" 창이 뜬다(1.0.2 배포본에서 OCR 코어 파일이 빠졌을 때 그랬다).
+    // 처리기를 주면 요청한 쪽의 약속만 실패하고, 그 오류는 아래에서 평소대로 다뤄진다.
+    const w = await createWorker(langs, 1, { langPath: langDir, gzip: false, cachePath: path.join(os.tmpdir(), "ogolgye-ocr"), workerPath, logger: () => {},
+      errorHandler: (e) => console.warn("[OCR] 작업자 오류:", String(e?.message || e).split("\n")[0]) });
     await w.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });   // 흩어진 글자(간판·지도·표지)에 맞는 방식
     return w;
     })().catch((e) => { workerP = null; workerKey = ""; throw e; });

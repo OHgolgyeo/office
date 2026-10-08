@@ -84,6 +84,8 @@ jobs:
     if: always() && needs.version.outputs.skip == 'false'
     runs-on: ubuntu-latest
     steps:
+      # 릴리스 안내문(.github/word-release-notes.md)을 읽으려고 저장소를 받는다
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: out
@@ -95,10 +97,15 @@ jobs:
           v="${{ needs.version.outputs.version }}"
           ls -la out
           test -f out/latest.yml || { echo "::error::Windows 설치 파일을 만들지 못해 릴리스를 올리지 않습니다."; exit 1; }
+          # 안내문: .github/word-release-notes.md 에 내용이 있으면 그것을, 없으면 설치 방법 기본 문구를 쓴다
+          if [ -s .github/word-release-notes.md ]; then
+            cp .github/word-release-notes.md notes.md
+          else
+            echo "Windows: Ogolgye-Word-Setup-$v.exe 를 받아 설치하세요. 설치한 뒤에는 새 버전이 자동으로 설치됩니다." > notes.md
+            echo "맥: 쓰시는 맥에 맞는 .dmg(애플 칩: arm64, 인텔: x64)를 받아 설치하세요." >> notes.md
+          fi
           gh release create "v$v" out/* --repo "${{ github.repository }}" --target "${{ github.sha }}" \
-            --title "오골계 워드 $v" \
-            --notes "Windows: Ogolgye-Word-Setup-$v.exe 를 받아 설치하세요. 설치한 뒤에는 새 버전이 자동으로 설치됩니다.
-          맥: 쓰시는 맥에 맞는 .dmg(애플 칩: arm64, 인텔: x64)를 받아 설치하세요."
+            --title "오골계 워드 $v" --notes-file notes.md
       - name: 릴리스 확인(자동 업데이트에 필요한 파일)
         env:
           GH_TOKEN: ${{ github.token }}

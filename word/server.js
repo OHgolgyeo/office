@@ -28,7 +28,8 @@ const STATIC = {
 let modsP = null, spacerP = null;
 const mods = () => (modsP ||= Promise.all([import("./core/session.js"), import("./core/viewer-shell.js"), import("./core/src/kiwi-spacer.js")])
   .then(([se, sh, kw]) => ({ PdfSession: se.PdfSession, buildShellHtml: sh.buildShellHtml, createKiwiSpacer: kw.createKiwiSpacer })));
-const spacer = () => (spacerP ||= mods().then((m) => m.createKiwiSpacer(path.join(__dirname, "models", "kiwi"))).catch(() => null));
+const spacer = () => (spacerP ||= mods().then((m) => m.createKiwiSpacer(path.join(__dirname, "models", "kiwi")))
+  .catch((e) => { console.warn("[Kiwi] 불러오지 못해 띄어쓰기 판단에 Kiwi 를 쓰지 않습니다:", e?.message || e); return null; }));
 // PDF 준비(글자 추출·문단 복원·글자 층)는 작업 스레드(core/prepare-worker.mjs)에서: 서버가 그동안에도 쪽 그림 요청에 답한다.
 // 작업 스레드를 못 띄우면 null(세션이 서버에서 직접 한다 — 그때만 이 스레드에서 Kiwi 를 불러온다).
 let prepW = null, prepSeq = 0, prepIdleTimer = 0;
@@ -36,7 +37,7 @@ const prepJobs = new Map();
 // Kiwi(문단 띄어쓰기 판단)는 작업 스레드 안에서 약 900MB 를 차지하고(WebAssembly 메모리라 한 번 늘면 줄지 않는다),
 // PDF 를 준비할 때(글자 추출 뒤 문단 복원)만 쓴다 → 준비가 끝나고 이만큼 아무 PDF 도 준비하지 않으면 작업 스레드를 끝내
 // 메모리를 돌려받는다. 다음 PDF 는 새 작업 스레드가 Kiwi 를 다시 불러온다(뒤에서 약 2~3초 더).
-const PREP_IDLE_MS = +process.env.OG_PREP_IDLE_MS || 3 * 60 * 1000;
+const PREP_IDLE_MS = +process.env.OG_PREP_IDLE_MS || 45 * 1000;
 function schedulePrepRelease() {
   clearTimeout(prepIdleTimer);
   prepIdleTimer = setTimeout(() => {
@@ -78,6 +79,8 @@ function prepareInWorker(bytes, onProgress, onPhase) {
  *  예전에는 레이아웃 분석이 도는 중에 끄면 계산 중인 쪽이 끝날 때까지(쪽당 최대 4초) 종료가 늦었다. */
 export async function shutdown() {
   clearTimeout(prepIdleTimer);
+  for (const s of sessions.values()) s.close();
+  sessions.clear(); hotSessionId = null;
   try { if (prepW) await prepW.terminate(); } catch { /* 이미 끝남 */ }
   prepW = null;
   try { (await import("./core/ppstructure.js")).shutdownModels(); } catch { /* 모델을 안 씀 */ }
@@ -91,6 +94,17 @@ function warmKiwi() { const w = prepareWorker(); if (!w) return; w.postMessage({
 
 const sessions = new Map();     // id → PdfSession
 let seq = 0;
+let hotSessionId = null;
+function activeSession(id) {
+  const s = sessions.get(id);
+  if (s) { sessions.delete(id); sessions.set(id, s); } // 최근 사용한 문서를 뒤로 보내 LRU 순서를 유지한다.
+  return s;
+}
+function activatePdfView(id) {
+  if (hotSessionId === id) return;
+  hotSessionId = id;
+  for (const [otherId, other] of sessions) if (otherId !== id) other.trimViewCaches?.();
+}
 async function openPdf(bytes, name) {
   const m = await mods();
   const s = await new m.PdfSession(bytes, name).open();
@@ -102,15 +116,15 @@ async function openPdf(bytes, name) {
   // AI 레이아웃 결과 저장 자리(파일 해시 + 모델 버전): 같은 PDF 를 다시 열면 모델을 다시 돌리지 않는다
   s.layoutStore = path.join(path.dirname(SETTINGS_FILE), "layout-cache", s.annotationKey + "-" + PP_LAYOUT_TAG + ".json");
   s.ocrLanguages = loadSettings().ocrLanguages;
+  s.autoLayout = !!loadSettings().pdfRules?.scanTables;
   sessions.set(id, s);
-  if (sessions.size > 6) { const [oldId, old] = sessions.entries().next().value; old.close(); sessions.delete(oldId); }
   // 기다리지 않는다(뒤에서). 준비가 끝나면, 레이아웃 분석을 켜 둔 경우 모든 쪽의 레이아웃을 한 쪽씩 미리 읽어 둔다
   // (문서화를 누를 때 96쪽이면 2분 넘게 기다렸다). 문서화를 누르면 같은 기억을 이어 쓰고 두 쪽씩 동시에 돈다.
   s.prepareConversion(spacer, prepareInWorker).then(async () => {   // spacer: 작업 스레드를 못 쓸 때만 여기서 불러온다
     if (!s.state.ready || !loadSettings().pdfRules?.scanTables) return;
     const { ppModelsInstalled } = await import("./core/ppstructure.js");
     if (!ppModelsInstalled(PP_DIR)) return;
-    s.layoutPages(s.pageSizes.map((_, i) => i), { concurrency: 1, front: false }).catch(() => {});
+    s.scheduleLayoutPrefetch();
   });
   return { id, name, pages: s.pageSizes.length, ms: Date.now() - s.state.t0 };
 }
@@ -288,9 +302,37 @@ function readBody(req, limit = 300 * 1024 * 1024) {
     req.on("error", fail);
   });
 }
-const readJson = async (req, limit) => JSON.parse((await readBody(req, limit)).toString("utf8") || "{}");
+const readJson = async (req, limit) => {
+  if (!/^application\/json(?:;|$)/i.test(String(req.headers["content-type"] || ""))) {
+    const e = new Error("JSON 요청 형식이 아닙니다."); e.status = 415; throw e;
+  }
+  return JSON.parse((await readBody(req, limit)).toString("utf8") || "{}");
+};
 const sendJson = (res, status, body, extra = {}) => res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", ...extra }).end(JSON.stringify(body));
 const sendBytes = (res, bytes, type = "application/octet-stream", extra = {}) => res.writeHead(200, { "Content-Type": type, ...extra }).end(bytes);
+
+function cookieValue(req, name) {
+  const part = String(req.headers.cookie || "").split(";").map((s) => s.trim()).find((s) => s.startsWith(name + "="));
+  return part ? decodeURIComponent(part.slice(name.length + 1)) : "";
+}
+function sameSecret(a, b) {
+  const aa = Buffer.from(String(a || "")), bb = Buffer.from(String(b || ""));
+  return aa.length === bb.length && aa.length > 0 && crypto.timingSafeEqual(aa, bb);
+}
+function loopbackHost(host) {
+  try { return ["127.0.0.1", "localhost", "[::1]"].includes(new URL(`http://${host}`).hostname); }
+  catch { return false; }
+}
+function securityHeaders(res, pathname) {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  let csp = "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'";
+  if (pathname.startsWith("/studio/")) csp += " 'unsafe-eval' 'wasm-unsafe-eval'";
+  if (/^\/pdf\/\d+\/view$/.test(pathname)) csp = "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'";
+  res.setHeader("Content-Security-Policy", csp);
+}
 
 // 편집 화면(rhwp-studio)에 오골계 워드 테마와 메뉴 연결 스크립트를 끼워 넣는다(rhwp 소스는 건드리지 않음)
 function patchStudioHtml(html) {
@@ -386,7 +428,7 @@ async function servePdf(req, res, url, s, what) {
   res.writeHead(404).end("not found");
 }
 
-export function startServer(port = 0) {
+export function startServer(port = 0, { authToken = "" } = {}) {
   if (process.env.OG_TRACE) {                                    // 진단(OG_TRACE=1): 서버가 막힌 구간(200ms 넘게)과 느린 요청을 터미널에
     let last = performance.now();
     setInterval(() => { const n = performance.now(), lag = n - last - 50; if (lag > 200) console.error(`[lag] ${Math.round(lag)}ms at ${new Date().toISOString().slice(11, 23)}`); last = n; }, 50).unref();
@@ -396,6 +438,10 @@ export function startServer(port = 0) {
     try {
       const url = new URL(req.url, "http://localhost");
       const p = url.pathname;
+      securityHeaders(res, p);
+      if (!loopbackHost(req.headers.host)) { res.writeHead(421).end("잘못된 호스트"); return; }
+      if (authToken && !sameSecret(cookieValue(req, "ogolgye_session"), authToken)) { res.writeHead(401).end("인증되지 않은 요청"); return; }
+      if (authToken && req.headers.origin && req.headers.origin !== `http://${req.headers.host}`) { res.writeHead(403).end("허용되지 않은 출처"); return; }
       if (p === "/") { res.writeHead(302, { Location: "/app/" }).end(); return; }
       if (API[p] && req.method === "POST") { await API[p](req, res, url); return; }
       if (p === "/api/blank") { sendBytes(res, await blankDocument()); return; }
@@ -419,11 +465,20 @@ export function startServer(port = 0) {
         return;
       }
       if (p === "/api/pp-structure") { sendJson(res, 200, req.method === "POST" ? await ppStartInstall() : await ppStatus(), { "Cache-Control": "no-store" }); return; }
-      if (p === "/api/settings") { sendJson(res, 200, req.method === "POST" ? saveSettings(await readJson(req, 65536)) : loadSettings()); return; }
+      if (p === "/api/settings") {
+        const patch = req.method === "POST" ? await readJson(req, 65536) : null;
+        const settings = patch ? saveSettings(patch) : loadSettings();
+        if (patch && Object.prototype.hasOwnProperty.call(patch, "pdfRules")) for (const s of sessions.values()) {
+          s.autoLayout = !!settings.pdfRules.scanTables;
+          if (s.autoLayout && s.state.ready) s.scheduleLayoutPrefetch(); else s.cancelLayoutPrefetch();
+        }
+        sendJson(res, 200, settings); return;
+      }
       const pm = p.match(/^\/pdf\/(\d+)\/(.+)$/);
       if (pm) {
-        const s = sessions.get(pm[1]);
+        const s = activeSession(pm[1]);
         if (!s) { res.writeHead(404).end("닫힌 문서"); return; }
+        if (pm[2] === "view" || /^page\/\d+\.jpg$/.test(pm[2])) activatePdfView(pm[1]);
         await servePdf(req, res, url, s, pm[2]); return;
       }
       for (const [prefix, base] of Object.entries(STATIC)) if (p.startsWith(prefix)) { serveStatic(res, base, p.slice(prefix.length)); return; }

@@ -10,27 +10,46 @@ for (let n = 1; n <= 6; n++) NAMED_IN["HEADING_" + n] = { heading: n };
 const hex2 = (v) => Math.round(Math.max(0, Math.min(1, v || 0)) * 255).toString(16).padStart(2, "0");
 const colorOf = (fc) => { const c = fc && fc.color && fc.color.rgbColor; return c ? (hex2(c.red) + hex2(c.green) + hex2(c.blue)).toUpperCase() : null; };
 const PT_PX = 96 / 72;
+// Google 문서의 글꼴 이름 → 편집 화면이 그릴 수 있는 이름. Google 은 "Nanum Gothic"처럼 띄어 쓴 영문 이름을 쓰는데 편집 화면의
+// 글꼴은 "나눔고딕"·"NanumGothic" 으로 등록되어 있어, 이름이 달라 기본 글꼴로 그려졌다. 목록에 없는 이름은 그대로 둔다
+// (Arial·Times New Roman 처럼 컴퓨터에 깔린 글꼴은 그 이름으로 그려지고, 없는 글꼴은 이름만 남는다).
+const FONT_IN = {
+  "nanum gothic": "나눔고딕", "nanumgothic": "나눔고딕", "nanum myeongjo": "나눔명조", "nanummyeongjo": "나눔명조",
+  "nanum gothic coding": "나눔고딕코딩", "gowun batang": "고운바탕", "gowun dodum": "고운돋움",
+  "noto sans kr": "Noto Sans KR", "noto serif kr": "Noto Serif KR", "pretendard": "Pretendard", "malgun gothic": "맑은 고딕",
+  "batang": "바탕", "gulim": "굴림", "dotum": "돋움", "gungsuh": "궁서",
+};
+const FONT_OUT = { "나눔고딕": "Nanum Gothic", "나눔명조": "Nanum Myeongjo", "나눔고딕코딩": "Nanum Gothic Coding", "고운바탕": "Gowun Batang", "고운돋움": "Gowun Dodum" };
+const fontIn = (name) => (name ? FONT_IN[String(name).trim().toLowerCase()] || String(name).trim() : null);
+const fontOut = (name) => FONT_OUT[name] || name;
+const familyOf = (ts) => (ts && ts.weightedFontFamily && ts.weightedFontFamily.fontFamily ? ts.weightedFontFamily.fontFamily : null);
+/** 이름 붙은 스타일(본문·제목 1…)이 정한 글꼴: { NORMAL_TEXT: "Arial", HEADING_1: … }. 글자에 직접 지정하지 않은 글은 이 글꼴을 물려받는다. */
+function styleFonts(namedStyles) {
+  const out = {};
+  for (const st of (namedStyles && namedStyles.styles) || []) { const f = familyOf(st.textStyle); if (f && st.namedStyleType) out[st.namedStyleType] = f; }
+  return out;
+}
 
 /** 탭 나무를 화면 순서(위에서 아래, 하위 탭 포함)대로 펼친다 */
 function flattenTabs(tabs, out = []) { for (const t of tabs || []) { out.push(t); flattenTabs(t.childTabs, out); } return out; }
 
 export async function docsToModel(doc, fetchImage) {
   let flat = flattenTabs(doc.tabs);
-  if (!flat.length) flat = [{ tabProperties: { title: doc.title }, documentTab: { body: doc.body, inlineObjects: doc.inlineObjects, documentStyle: doc.documentStyle } }];
+  if (!flat.length) flat = [{ tabProperties: { title: doc.title }, documentTab: { body: doc.body, inlineObjects: doc.inlineObjects, documentStyle: doc.documentStyle, namedStyles: doc.namedStyles } }];
   // 탭과 그 안의 블록은 서로 독립적이다. 순서는 Promise.all이 보존하므로 그림 다운로드만 병렬화한다.
   const tabs = await Promise.all(flat.map(async (t, index) => {
     const dt = t.documentTab || {};
-    const blocks = await contentToBlocks((dt.body && dt.body.content) || [], dt.inlineObjects || {}, fetchImage);
+    const blocks = await contentToBlocks((dt.body && dt.body.content) || [], dt.inlineObjects || {}, fetchImage, styleFonts(dt.namedStyles || doc.namedStyles));
     return { name: (t.tabProperties && t.tabProperties.title) || `탭 ${index + 1}`, blocks };
   }));
   const mode = flat[0].documentTab && flat[0].documentTab.documentStyle && flat[0].documentTab.documentStyle.documentFormat && flat[0].documentTab.documentStyle.documentFormat.documentMode;
   return { tabs, pageless: mode ? mode === "PAGELESS" : null };
 }
 
-async function contentToBlocks(content, inlineObjects, fetchImage) {
+async function contentToBlocks(content, inlineObjects, fetchImage, fonts = {}) {
   const blocks = (await Promise.all((content || []).map((el) => {
-    if (el.paragraph) return paragraphBlock(el.paragraph, inlineObjects, fetchImage);
-    if (el.table) return tableBlock(el.table, inlineObjects, fetchImage);
+    if (el.paragraph) return paragraphBlock(el.paragraph, inlineObjects, fetchImage, fonts);
+    if (el.table) return tableBlock(el.table, inlineObjects, fetchImage, fonts);
     return null;
   }))).filter(Boolean);
   // 문서 끝의 빈 문단 하나(Google 문서는 늘 끝에 빈 문단이 있다)는 뺀다
@@ -38,16 +57,18 @@ async function contentToBlocks(content, inlineObjects, fetchImage) {
   return blocks;
 }
 
-async function paragraphBlock(p, inlineObjects, fetchImage) {
+async function paragraphBlock(p, inlineObjects, fetchImage, fonts = {}) {
   const ps = p.paragraphStyle || {};
   const named = NAMED_IN[ps.namedStyleType] || {};
+  // 글자에 글꼴을 직접 지정하지 않았으면 문단 스타일(제목 1 등)의 글꼴, 그것도 없으면 본문 스타일의 글꼴을 물려받는다
+  const inherited = fonts[ps.namedStyleType] || fonts.NORMAL_TEXT || null;
   const chunks = await Promise.all((p.elements || []).map(async (e) => {
     if (e.textRun) {
       const ts = e.textRun.textStyle || {};
       const fmt = {
         b: !!ts.bold, i: !!ts.italic, u: !!ts.underline && !(ts.link), s: !!ts.strikethrough,
         color: colorOf(ts.foregroundColor), size: ts.fontSize && ts.fontSize.magnitude ? ts.fontSize.magnitude : null,
-        font: ts.weightedFontFamily && ts.weightedFontFamily.fontFamily ? ts.weightedFontFamily.fontFamily : null,
+        font: fontIn(familyOf(ts) || inherited),
       };
       const parts = String(e.textRun.content || "").replace(/\n$/, "").split("\u000b");   // \u000b = 줄바꿈(Shift+Enter)
       const out = [];
@@ -71,7 +92,7 @@ async function paragraphBlock(p, inlineObjects, fetchImage) {
   return { t: "p", align: ALIGN_IN[ps.alignment] || "left", heading: named.heading || 0, style: named.style || null, runs };
 }
 
-async function tableBlock(tbl, inlineObjects, fetchImage) {
+async function tableBlock(tbl, inlineObjects, fetchImage, fonts = {}) {
   const rows = [], taken = [];                       // taken[r][c] = 앞 칸의 합친 범위에 들어간 자리
   (tbl.tableRows || []).forEach((tr, r) => {
     const row = []; taken[r] = taken[r] || [];
@@ -79,7 +100,7 @@ async function tableBlock(tbl, inlineObjects, fetchImage) {
       if (taken[r][c]) return;                       // 합친 칸에 가려진 자리(API 는 가려진 칸도 목록에 넣는다)
       const st = cell.tableCellStyle || {}, rs = st.rowSpan || 1, cs = st.columnSpan || 1;
       for (let dr = 0; dr < rs; dr++) for (let dc = 0; dc < cs; dc++) { taken[r + dr] = taken[r + dr] || []; if (dr || dc) taken[r + dr][c + dc] = true; }
-      row.push({ colspan: cs, rowspan: rs, blocksPromise: contentToBlocks(cell.content || [], inlineObjects, fetchImage) });
+      row.push({ colspan: cs, rowspan: rs, blocksPromise: contentToBlocks(cell.content || [], inlineObjects, fetchImage, fonts) });
     });
     rows.push(row);
   });
@@ -114,7 +135,7 @@ function textStyleRequests(tabId, base, spans, styled) {
     if (r.s) { ts.strikethrough = true; f.push("strikethrough"); }
     if (r.color && r.color !== "000000") { Object.assign(ts, { foregroundColor: rgb(r.color) }); f.push("foregroundColor"); }
     if (r.size && !styled) { ts.fontSize = { magnitude: r.size, unit: "PT" }; f.push("fontSize"); }   // 제목류는 Google 스타일 크기를 따른다
-    if (r.font) { ts.weightedFontFamily = { fontFamily: r.font }; f.push("weightedFontFamily"); }
+    if (r.font) { ts.weightedFontFamily = { fontFamily: fontOut(r.font) }; f.push("weightedFontFamily"); }
     if (f.length) out.push({ updateTextStyle: { range: { startIndex: base + start, endIndex: base + end, tabId }, textStyle: ts, fields: f.join(",") } });
   }
   return out;

@@ -7,7 +7,10 @@
 import { parentPort, workerData } from "node:worker_threads";
 
 let spacerP = null;
-const spacer = () => (spacerP ||= import("./src/kiwi-spacer.js").then((m) => m.createKiwiSpacer(workerData.kiwiDir)).catch(() => null));
+const spacer = () => (spacerP ||= import("./src/kiwi-spacer.js").then((m) => m.createKiwiSpacer(workerData.kiwiDir))
+  // Kiwi 를 못 불러오면 통계만으로 띄어쓰기를 정한다(품질이 떨어진다) — 조용히 넘어가지 않고 터미널에 남긴다
+  .then((sp) => { if (!sp) console.warn("[Kiwi] 모델을 찾지 못해 띄어쓰기 판단에 Kiwi 를 쓰지 않습니다:", workerData.kiwiDir); return sp; })
+  .catch((e) => { console.warn("[Kiwi] 불러오지 못해 띄어쓰기 판단에 Kiwi 를 쓰지 않습니다:", e?.message || e); return null; }));
 const libs = () => Promise.all([import("./src/extract-pdfium.js"), import("./src/reconstruct.js"), import("./src/render-layout.js")]);
 
 const queue = [];

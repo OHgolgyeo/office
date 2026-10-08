@@ -69,10 +69,22 @@ export function zipBytes(entries) {
   return Buffer.concat([...local, ...central, end]);
 }
 
-export function htmlArchive(source) {
+// images: 따로 넘어온 그림 [{ mime, bytes }] — HTML 에는 src="og-img:번호" 로 들어 있다(같은 그림은 파일 하나).
+export function htmlArchive(source, images = []) {
   const entries = [];
   let sequence = 0;
-  const html = String(source).replace(/(<img\b[^>]*?\bsrc=["'])data:([^;,"']+);base64,([^"']+)(["'])/gi, (_all, before, mime, base64, quote) => {
+  const extensionOf = (mime) => ({ "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp", "image/svg+xml": "svg" })[String(mime).toLowerCase()] || "bin";
+  const lifted = new Map();
+  const html = String(source).replace(/(<img\b[^>]*?\bsrc=["'])og-img:(\d+)(["'])/gi, (all, before, index, quote) => {
+    const im = images[+index];
+    if (!im) return all;
+    if (!lifted.has(+index)) {
+      const name = `assets/image-${String(++sequence).padStart(3, "0")}.${extensionOf(im.mime)}`;
+      entries.push({ name, data: Buffer.from(im.bytes.buffer, im.bytes.byteOffset, im.bytes.byteLength) });
+      lifted.set(+index, name);
+    }
+    return before + lifted.get(+index) + quote;
+  }).replace(/(<img\b[^>]*?\bsrc=["'])data:([^;,"']+);base64,([^"']+)(["'])/gi, (_all, before, mime, base64, quote) => {
     const extension = ({
       "image/jpeg": "jpg",
       "image/png": "png",
@@ -87,12 +99,27 @@ export function htmlArchive(source) {
   return zipBytes([{ name: "index.html", data: Buffer.from(html, "utf8") }, ...entries]);
 }
 
-function svgSize(svg) {
+export function svgSize(svg) {
   const tag = String(svg).match(/<svg\b[^>]*>/i)?.[0] || "";
   const viewBox = tag.match(/\bviewBox=["']\s*[\d.+-]+\s+[\d.+-]+\s+([\d.+-]+)\s+([\d.+-]+)["']/i);
   const width = tag.match(/\bwidth=["']([\d.+-]+)/i);
   const height = tag.match(/\bheight=["']([\d.+-]+)/i);
   return { width: +(viewBox?.[1] || width?.[1] || 595), height: +(viewBox?.[2] || height?.[1] || 842) };
+}
+
+export function pdfPrintStreamShell() {
+  return '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="script-src \'none\'"><style id="page-rules"></style><style>*{box-sizing:border-box}html,body{margin:0;padding:0}.page{break-after:page}.page:last-child{break-after:auto}.page>svg{display:block;width:100%;height:100%}</style></head><body></body></html>';
+}
+
+/** SVG 한 쪽을 인쇄 DOM 조각으로 만든다. names는 스트림 동안 유지해 같은 크기의 @page 규칙을 공유한다. */
+export function pdfPrintStreamPage(svg, names = new Map()) {
+  const { width, height } = svgSize(svg), key = `${width}x${height}`;
+  let name = names.get(key), rule = "";
+  if (!name) {
+    name = `p${names.size}`; names.set(key, name);
+    rule = `@page ${name}{size:${width}px ${height}px;margin:0}.${name}{page:${name};width:${width}px;height:${Math.max(1, height - 1)}px}`;
+  }
+  return { rule, page: `<section class="page ${name}">${String(svg).trim()}</section>` };
 }
 
 export function pdfPrintHtml(svgs) {
@@ -110,17 +137,10 @@ export function pdfPrintParts(svgs) {
   // 쪽 나눔과 break-after 가 겹쳐 쪽마다 빈 쪽이 하나씩 끼었다(6쪽 문서가 12쪽).
   const rules = [], names = new Map();
   const pages = svgs.map((svg) => {
-    const { width, height } = svgSize(svg);
-    const key = `${width}x${height}`;
-    if (!names.has(key)) {
-      const name = `p${names.size}`;
-      names.set(key, name);
-      rules.push(`@page ${name}{size:${width}px ${height}px;margin:0}.${name}{page:${name};width:${width}px;height:${Math.max(1, height - 1)}px}`);
-    }
-    return `<section class="page ${names.get(key)}">${String(svg).trim()}</section>`;
+    const part = pdfPrintStreamPage(svg, names); if (part.rule) rules.push(part.rule); return part.page;
   });
   // 쪽 상자에 overflow:hidden 을 두면 Chromium 인쇄가 쪽마다 빈 쪽을 하나씩 더 만든다(실측: 3쪽 → 6쪽). 쪽 그림은 쪽 크기에
   // 딱 맞으므로 넘칠 것이 없어 두지 않는다.
-  const shell = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="script-src 'none'"><style>${rules.join("")}*{box-sizing:border-box}html,body{margin:0;padding:0}.page{break-after:page}.page:last-child{break-after:auto}.page>svg{display:block;width:100%;height:100%}</style></head><body></body></html>`;
+  const shell = pdfPrintStreamShell().replace('<style id="page-rules"></style>', `<style id="page-rules">${rules.join("")}</style>`);
   return { shell, pages };
 }

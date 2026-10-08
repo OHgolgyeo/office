@@ -267,9 +267,31 @@ addEventListener("message", (e) => {
     setTimeout(() => {
       try {
         const data = ogBuildExport(e.data.format);
-        parent.postMessage({ type: "ogolgye:export-result", requestId: e.data.requestId, ok: true, ...data }, location.origin);
+        // 그림을 따로: HTML 속 base64 그림을 꺼내 바이트로 넘긴다(넘길 때 복사하지 않는다). 그림이 많은 긴 문서에서 같은 그림이
+        // HTML 문자열 → 창 사이 복사 → 파싱한 문서 → 중간 구조 → 프로세스 사이 복사로 여러 벌 생기던 것을 줄인다.
+        const images = e.data.liftImages ? ogLiftExportImages(data) : null;
+        parent.postMessage({ type: "ogolgye:export-result", requestId: e.data.requestId, ok: true, ...data, ...(images ? { images } : {}) }, location.origin, images ? images.map((im) => im.bytes.buffer) : []);
       } catch (err) {
         parent.postMessage({ type: "ogolgye:export-result", requestId: e.data.requestId, ok: false, error: String(err?.message || err) }, location.origin);
+      }
+    }, 0);
+  }
+  if (e.data.type === "ogolgye:export-pdf-info" || e.data.type === "ogolgye:export-pdf-page" || e.data.type === "ogolgye:export-pdf-end") {
+    setTimeout(() => {
+      try {
+        const w = ogW(); if (!w || !ogDoc()) throw new Error("열린 문서가 없습니다.");
+        const data = e.data.type === "ogolgye:export-pdf-info"
+          ? ogBeginPdfExport()
+          : e.data.type === "ogolgye:export-pdf-end"
+            ? (ogEndPdfExport(), { ended: true })
+            : (() => {
+            const page = Number(e.data.page);
+            if (!Number.isInteger(page) || page < 0 || page >= w.pageCount) throw new Error("PDF 쪽 번호가 올바르지 않습니다.");
+            return { page, svg: w.renderPageSvg(page) };
+          })();
+        parent.postMessage({ type: "ogolgye:export-pdf-result", requestId: e.data.requestId, ok: true, ...data }, location.origin);
+      } catch (err) {
+        parent.postMessage({ type: "ogolgye:export-pdf-result", requestId: e.data.requestId, ok: false, error: String(err?.message || err) }, location.origin);
       }
     }, 0);
   }
@@ -377,7 +399,7 @@ function ogBodyBand(info) {
 // 입력할 때마다 쪽 수에 비례해 느려졌으므로, 보통 입력에는 커서가 있는 쪽 주변과
 // 마지막 쪽만 갱신한다. 문서 교체·쪽 수·용지 변경 때만 전체를 다시 읽는다.
 // rev: 문서가 바뀔 때마다 올린다. seen: 쪽마다 마지막으로 잰 rev — 화면에 보이는 쪽이 옛 rev 면 다시 잰다(ogCheckVisibleEdges)
-const ogEdges = { key: "", list: [], dirty: new Set(), refreshTimer: 0, rev: 0, seen: new Map() };
+const ogEdges = { key: "", list: [], dirty: new Set(), refreshTimer: 0, rev: 0, seen: new Map(), stable: 0, convergeFrom: null };
 const ogSelectionRuns = { doc: null, pages: new Map() };
 const ogPageGeometry = { key: "", infos: [], body: [] };
 function ogDirtyPageHint() {
@@ -396,7 +418,7 @@ function ogDirtyPageHint() {
 function ogInvalidatePageEdges(all = false) {
   ogEdges.rev++;
   if (all) {
-    ogEdges.key = ""; ogEdges.list = []; ogEdges.dirty.clear(); clearTimeout(ogEdges.refreshTimer); ogEdges.seen.clear();
+    ogEdges.key = ""; ogEdges.list = []; ogEdges.dirty.clear(); clearTimeout(ogEdges.refreshTimer); ogEdges.seen.clear(); ogEdges.stable = 0; ogEdges.convergeFrom = null;
     ogSelectionRuns.doc = null; ogSelectionRuns.pages.clear(); ogPageGeometry.key = "";
     return;
   }
@@ -410,9 +432,10 @@ function ogInvalidatePageEdges(all = false) {
   // 앞쪽에서 엔터를 치면 뒤쪽 화면 쪽은 옛 경계로 잘려 이음매에서 줄이 반쯤 가려졌다. 커서 쪽 직전부터 끝까지 다시 잰다
   // (ogPageEdges 가 커서에 가까운 쪽부터 짧게 나눠 잰다).
   ogEdges.hint = page;
-  for (let i = page < 0 ? 0 : Math.max(0, page - 1); i < n; i++) ogEdges.dirty.add(i);
+  ogEdges.convergeFrom = page < 0 ? 0 : Math.max(0, page - 1); ogEdges.stable = 0;
+  for (let i = ogEdges.convergeFrom; i < n; i++) ogEdges.dirty.add(i);
   clearTimeout(ogEdges.refreshTimer);
-  ogEdges.refreshTimer = setTimeout(() => { if (ogPageless() && ogEdges.dirty.size) ogRelayout(); }, 350);
+  ogEdges.refreshTimer = setTimeout(ogRefreshEdges, 350);
 }
 function ogPageGeometryFor(w, n) {
   let key = "";
@@ -439,29 +462,50 @@ function ogPageEdges(n, bandOf) {
   try {
     if (!w.doc.__ogId) w.doc.__ogId = Math.random();                // 문서를 다시 읽어 바꿔 끼우면 새로 읽는다
     // 보기 용지(ogPL.view)도 키에 넣는다: 창 폭·확대가 바뀌면 쪽 수가 같아도 모든 쪽의 경계가 바뀐다
-    key = `${w.doc.__ogId}|${n}|${JSON.stringify(w.getPageDef(0))}|${JSON.stringify(ogPL.view)}`;
+    key = `${w.doc.__ogId}|${JSON.stringify(w.getPageDef(0))}|${JSON.stringify(ogPL.view)}`;
   } catch { key = String(n); }
   const readOne = (i) => { const [t, b] = bandOf(i); return ogPageContentEdge(i, t, b); };
   const read = () => Array.from({ length: n }, (_, i) => readOne(i));
-  if (ogEdges.key !== key || ogEdges.list.length !== n) {
+  if (ogEdges.key !== key) {
     ogEdges.key = key; ogEdges.list = read(); ogEdges.dirty.clear();
     ogEdges.seen.clear(); for (let i = 0; i < n; i++) ogEdges.seen.set(i, ogEdges.rev);
     return ogEdges.list;
+  }
+  // 글을 한 줄 늘려 쪽 수만 바뀐 경우 기존 쪽 전체를 다시 읽지 않는다. 새 쪽만 즉시 읽고,
+  // 앞쪽 변화 범위는 document-changed가 표시한 dirty 구간에서 짧게 나눠 확인한다.
+  if (ogEdges.list.length !== n) {
+    const old = ogEdges.list.length;
+    if (n < old) ogEdges.list.length = n;
+    else for (let i = old; i < n; i++) { ogEdges.list.push(readOne(i)); ogEdges.seen.set(i, ogEdges.rev); }
+    for (const i of [...ogEdges.dirty]) if (i >= n) ogEdges.dirty.delete(i);
   }
   if (!ogEdges.dirty.size) return ogEdges.list;
   // 이 함수 자체가 배치 계산 도중 불리므로 바뀐 쪽만 지금 읽으면 새 경계가 같은 배치에 바로 반영된다.
   // 다시 잴 쪽이 많으면(앞쪽 편집으로 뒤 쪽이 모두 밀림) 커서에 가까운 쪽부터 약 25ms 만 재고,
   // 남은 쪽은 잠시 뒤 다시 배치하면서 이어서 잰다(긴 문서에서 타자가 멈추지 않게).
-  const hint = ogEdges.hint ?? 0;
-  const pages = [...ogEdges.dirty].filter((i) => i >= 0 && i < n).sort((a, b) => Math.abs(a - hint) - Math.abs(b - hint));
+  const pages = [...ogEdges.dirty].filter((i) => i >= 0 && i < n).sort((a, b) => a - b);
+  const sameEdge = (a, b) => !!a && !!b && Math.abs(a.start - b.start) < 0.5 && Math.abs(a.end - b.end) < 0.5
+    && (a.exact === undefined || b.exact === undefined || Math.abs(a.exact - b.exact) < 0.5)
+    && a.startKind === b.startKind && a.endKind === b.endKind;
   const t0 = performance.now();
   let k = 0;
   for (; k < pages.length; k++) {
     if (k >= 3 && performance.now() - t0 > 25) break;
-    ogEdges.list[pages[k]] = readOne(pages[k]); ogEdges.dirty.delete(pages[k]); ogEdges.seen.set(pages[k], ogEdges.rev);
+    const page = pages[k], before = ogEdges.list[page], after = readOne(page);
+    ogEdges.list[page] = after; ogEdges.dirty.delete(page); ogEdges.seen.set(page, ogEdges.rev);
+    if (ogEdges.convergeFrom !== null && page >= ogEdges.convergeFrom) {
+      ogEdges.stable = sameEdge(before, after) ? ogEdges.stable + 1 : 0;
+      // 세 쪽 연속으로 실제 내용 경계가 같으면 이후 쪽의 화면 배치는 그대로다. 뒤쪽은 보일 때 검증하므로
+      // 멀리 떨어진 표·그림이 바뀐 예외도 스크롤 시 바로 보정된다.
+      if (ogEdges.stable >= 3) {
+        for (const i of [...ogEdges.dirty]) if (i > page) ogEdges.dirty.delete(i);
+        ogEdges.convergeFrom = null; ogEdges.stable = 0;
+        break;
+      }
+    }
   }
   for (const i of [...ogEdges.dirty]) if (i < 0 || i >= n) ogEdges.dirty.delete(i);
-  if (ogEdges.dirty.size) { clearTimeout(ogEdges.refreshTimer); ogEdges.refreshTimer = setTimeout(() => { if (ogPageless() && ogEdges.dirty.size) ogRelayout(); }, 30); }
+  if (ogEdges.dirty.size) { clearTimeout(ogEdges.refreshTimer); ogEdges.refreshTimer = setTimeout(ogRefreshEdges, 30); }
   return ogEdges.list;
 }
 function ogPageContentEdge(i, t, b) {
@@ -472,7 +516,10 @@ function ogPageContentEdge(i, t, b) {
     try {
       const r = JSON.parse(w.doc.getPageContentBounds(i));
       if (r.top === null || r.bottom === null) return { start: t, end: b + 14 };
-      const start = Math.max(0, Math.min(r.top, b));
+      // 표 테두리는 표의 위·아래 끝 선 "위에" 그려져 선 두께의 절반이 표 밖으로 나간다. 쪽이 표로 시작하거나 표로 끝날 때 표 끝에
+      // 딱 맞춰 자르면 테두리가 반쯤 잘려 옅고 얇게 보였다(같은 모양의 표인데 쪽 첫머리의 표만 위 테두리가 얇음). 1px 여유를 둔다.
+      const edgePad = (kind) => (kind === "table" ? 1 : 0);
+      const start = Math.max(0, Math.min(r.top, b) - edgePad(r.topKind));
       // 끝: 마지막이 글 줄이면 다음 줄이 올 자리(줄 간격 그대로 이어지게), 표·개체면 그 아래 끝 + 조금.
       // exact 는 다음 쪽이 같은 표의 이어지는 조각으로 시작할 때 틈 없이 붙이는 자리.
       let end;
@@ -486,7 +533,7 @@ function ogPageContentEdge(i, t, b) {
         const pitch = r.pitch && r.pitch <= lineH * 3 ? r.pitch : lineH * 1.6;
         end = lineH > 40 ? r.bottom + 8 : Math.max(r.bottom, r.lineTop + pitch);
       } else end = r.bottom + 8;
-      return { start, end: Math.max(end, start + 1), exact: r.bottom, startKind: r.topKind, endKind: r.bottomKind };
+      return { start, end: Math.max(end, start + 1), exact: r.bottom + edgePad(r.bottomKind), startKind: r.topKind, endKind: r.bottomKind };
     } catch { /* 아래 추정 방식 */ }
   }
   let ys = [], lastH = 0, start = Infinity, end = -Infinity;
@@ -517,6 +564,21 @@ function ogInstallPageless() {
   if (vs.__ogPageless) return true;
   vs.__ogPageless = true;
   ogInstallPagePointSync(og.inputHandler, vs);
+  // 편집 화면은 마우스 자리의 쪽을 "쪽 시작 자리가 그 아래인 마지막 쪽"으로 찾는다. 페이지 없음에서는 쪽을 잘라 이어 붙여
+  // 다음 쪽의 시작 자리(잘린 위 여백 포함)가 앞 쪽의 마지막 줄들과 겹치므로, 쪽 끝의 위 여백 높이(약 28px)만큼은 다음 쪽의
+  // 여백으로 잘못 짚었다 — 그 자리의 표 테두리·그림에 마우스를 올려도 크기 조절 표시가 나오지 않고 클릭도 빗나갔다.
+  // 화면에 보이는 띠(이음매 사이)로 쪽을 찾는다. 띠 밖(문서 탭으로 치운 쪽 등)은 원래 방식.
+  const pageAtY = vs.getPageAtY.bind(vs);
+  vs.getPageAtY = function (docY) {
+    const bands = this.__ogBands;
+    if (ogPageless() && bands) {
+      for (let i = 0; i < bands.length; i++) {
+        const off = this.pageOffsets[i];
+        if (docY >= off + bands[i][0] && docY < off + bands[i][1]) return i;
+      }
+    }
+    return pageAtY(docY);
+  };
   const original = vs.layoutSingleColumn.bind(vs);
   vs.layoutSingleColumn = function () {
     original();
@@ -695,7 +757,7 @@ function ogCheckVisibleEdges() {
   if (pending) return;
   ogEdges.hint = Math.min(...stale);
   clearTimeout(ogEdges.refreshTimer);
-  ogEdges.refreshTimer = setTimeout(() => { if (ogPageless() && ogEdges.dirty.size) ogRelayout(); }, 30);
+  ogEdges.refreshTimer = setTimeout(ogRefreshEdges, 30);
 }
 // 마지막 안전장치: 화면이 잠잠해지면(0.4초) 보이는 쪽의 내용 범위를 엔진에서 다시 재서, 기억한 경계와 다르면 바로 고친다.
 // 경계가 옛 값으로 남는 길을 하나씩 막아도(붙여넣기 뒤, 뒤에서 도는 쪽 나눔, 앞쪽 편집) 놓친 길이 있으면 그림 위쪽이나
@@ -717,7 +779,7 @@ function ogVerifyVisibleEdges() {
       if (differs(fresh.start, cur.start) || differs(fresh.end, cur.end) || differs(fresh.exact, cur.exact) || fresh.startKind !== cur.startKind || fresh.endKind !== cur.endKind) { ogEdges.list[i] = fresh; changed = true; }
       ogEdges.seen.set(i, ogEdges.rev);
     }
-    if (changed) ogRelayout();
+    if (changed) ogSoftRelayout();
   }, 400);
 }
 let ogClipQueued = false;
@@ -732,12 +794,20 @@ function ogTrimSelectionRects(rects, pages = null) {
   if (!ogPageless() || !Array.isArray(rects) || !rects.length) return rects;
   const d = ogDoc();
   if (!d) return rects;
-  if (ogSelectionRuns.doc !== d) { ogSelectionRuns.doc = d; ogSelectionRuns.pages.clear(); }
+  // 기억해 둔 글 배치가 지금 화면과 다르면(옛 배치) 선택 표시를 엉뚱한 폭으로 자른다 — 줄마다 앞쪽 몇 글자만 칠해진 것처럼 보였다.
+  // 문서가 바뀌거나(rev: 편집·뒤에서 도는 쪽 나눔), 보기 용지가 바뀌면(창 폭 → 줄바꿈이 달라짐) 모두 버린다. 그 밖에 놓친 길
+  // (글꼴이 늦게 불려 글 폭이 바뀜 등)이 있어도 오래 남지 않게, 읽은 지 1.5초가 지난 것은 다시 읽는다.
+  const stamp = `${ogEdges.rev}|${JSON.stringify(ogPL.view)}`;
+  if (ogSelectionRuns.doc !== d || ogSelectionRuns.stamp !== stamp) { ogSelectionRuns.doc = d; ogSelectionRuns.stamp = stamp; ogSelectionRuns.pages.clear(); }
+  const now = performance.now();
   const runsFor = (pageIndex) => {
     if (ogSelectionRuns.pages.has(pageIndex)) {
       const cached = ogSelectionRuns.pages.get(pageIndex);
-      ogSelectionRuns.pages.delete(pageIndex); ogSelectionRuns.pages.set(pageIndex, cached);   // LRU
-      return cached;
+      if (now - cached.at <= 1500) {
+        ogSelectionRuns.pages.delete(pageIndex); ogSelectionRuns.pages.set(pageIndex, cached);   // LRU
+        return cached;
+      }
+      ogSelectionRuns.pages.delete(pageIndex);
     }
     let runs = [];
     try {
@@ -749,7 +819,7 @@ function ogTrimSelectionRects(rects, pages = null) {
     } catch { runs = []; }
     // 선택 사각형 하나마다 그 쪽의 모든 글자 조각을 filter하면 전체 선택이 O(줄 수×글자 조각 수)가 된다.
     // y순 인덱스와 최대 높이를 함께 저장해 해당 줄 주변만 이진 탐색한다.
-    const indexed = { runs, maxH: runs.reduce((m, r) => Math.max(m, Number.isFinite(r.h) && r.h > 0 ? r.h : 0), 0) };
+    const indexed = { runs, at: now, maxH: runs.reduce((m, r) => Math.max(m, Number.isFinite(r.h) && r.h > 0 ? r.h : 0), 0) };
     ogSelectionRuns.pages.set(pageIndex, indexed);
     while (ogSelectionRuns.pages.size > 16) ogSelectionRuns.pages.delete(ogSelectionRuns.pages.keys().next().value);
     return indexed;
@@ -850,6 +920,66 @@ function ogRefreshSelection() {
   } catch { return false; }
 }
 
+// 쪽 위치만 다시 잡기(다시 그리지 않음). ogRelayout 은 확대/축소 신호를 보내 화면에 보이는 쪽을 전부 다시 그린다 — 긴 문서에서
+// 한 번에 0.3~0.5초. 쪽 경계가 바뀌었을 뿐 쪽 그림은 그대로인 경우(타자·엔터 뒤, 새 쪽이 보일 때)에는 쪽 자리만 옮기면 된다:
+// 편집 화면의 배치 계산(recalcLayout — 이미 그려진 쪽 그림을 새 자리로 옮긴다)과 보이는 쪽 갱신(새로 보이는 쪽만 그린다)을 쓴다.
+function ogSoftRelayout() {
+  const og = window.__ogolgyeStudio, ih = og?.inputHandler, cv = og?.canvasView, vm = ih?.viewportManager, c = ih?.container, vs = ih?.virtualScroll;
+  if (!cv || !vm || !c || !vs || typeof cv.recalcLayout !== "function" || typeof cv.updateVisiblePages !== "function") { ogRelayout(); return; }
+  try {
+    // 기준 쪽(커서가 있는 쪽이 그려져 있으면 그 쪽, 아니면 화면 맨 위에 걸친 쪽)이 화면에서 제자리에 있게 스크롤을 맞춘다
+    let anchor = -1;
+    try { const r = ih.cursor?.getRect?.(); if (Number.isInteger(r?.pageIndex) && (cv.canvasPool?.activePages || []).includes(r.pageIndex)) anchor = r.pageIndex; } catch { /* 커서 없음 */ }
+    if (anchor < 0) anchor = vs.getPageAtY(c.scrollTop + 1);
+    const before = vs.pageOffsets[anchor];
+    vm.scrollY = c.scrollTop; vm.scrollX = c.scrollLeft;
+    cv.recalcLayout();
+    const delta = vs.pageOffsets[anchor] - before;
+    if (Number.isFinite(delta) && Math.abs(delta) > 0.5) { if (typeof vm.setScrollTop === "function") vm.setScrollTop(c.scrollTop + delta); else c.scrollTop += delta; }
+    cv.updateVisiblePages();
+    // 커서·선택·개체 손잡이를 새 쪽 자리에 맞춘다(확대/축소 신호를 받았을 때 편집 화면이 하는 일)
+    const zoom = vm.getZoom();
+    try { if (ih.active && ih.cursor.getRect()) ih.caret.updatePosition(zoom); } catch { /* 커서 표시 없음 */ }
+    try { if (ih.fieldMarker?.isVisible) ih.updateFieldMarkers(); } catch { /* 필드 표시 없음 */ }
+    try { if (ih.cursor.isInCellSelectionMode?.()) ih.updateCellSelection(); } catch { /* 칸 선택 없음 */ }
+    try { if (ih.cursor.isInPictureObjectSelection?.()) ih.renderPictureObjectSelection(); } catch { /* 그림 선택 없음 */ }
+    try { if (ih.cursor.isInTableObjectSelection?.()) ih.renderTableObjectSelection(); } catch { /* 표 선택 없음 */ }
+  } catch { ogRelayout(); return; }
+  ogQueueClip();
+  ogFrame(ogRefreshSelection);
+}
+// 다시 잴 쪽(dirty)을 재 보고, 경계가 실제로 바뀐 때만 쪽 위치를 다시 잡는다. 예전에는 재기 전에 무조건 다시 배치(= 모두 다시 그림)했다
+// — 줄 수가 그대로인 타자(대부분)에도 타자를 멈출 때마다 화면이 0.3~0.5초 멈췄다.
+// 커서 쪽부터 뒤로 재다가 세 쪽이 잇달아 그대로면 그 뒤 쪽들은 재지 않는다(보일 때 확인한다 — ogCheckVisibleEdges).
+function ogRefreshEdges() {
+  if (!ogPageless()) return;
+  const vs = window.__ogolgyeStudio?.inputHandler?.virtualScroll, n = vs?.pageHeights?.length || 0;
+  if (!ogEdges.dirty.size) return;
+  let pageCount = n; try { pageCount = ogW().pageCount ?? ogW().doc.pageCount(); } catch { /* 편집 준비 중 */ }
+  // 쪽 수·용지가 바뀌었으면 배치 계산이 모든 것을 다시 읽어야 한다(쪽 그림도 달라진다)
+  if (!n || pageCount !== n || ogEdges.list.length !== n || ogPageGeometry.body.length !== n) { ogRelayout(); return; }
+  const zoom = window.__ogolgyeStudio.inputHandler.viewportManager?.getZoom?.() || 1;
+  const hint = Math.max(0, (ogEdges.hint ?? 0) - 1);
+  const pages = [...ogEdges.dirty].filter((i) => i >= 0 && i < n).sort((a, b) => (a < hint) - (b < hint) || a - b);   // 커서 쪽부터 뒤로, 그다음 앞쪽
+  const differs = (a, b) => Math.abs((a ?? 0) - (b ?? 0)) > 0.5;
+  const t0 = performance.now();
+  let changed = false, calm = 0, k = 0;
+  for (const i of pages) {
+    if (k >= 3 && performance.now() - t0 > 25) break;
+    const cur = ogEdges.list[i], [t, b] = ogPageGeometry.body[i] || [0, vs.pageHeights[i] / zoom];
+    let fresh; try { fresh = ogPageContentEdge(i, t, b); } catch { ogEdges.dirty.delete(i); continue; }
+    k++; ogEdges.dirty.delete(i); ogEdges.seen.set(i, ogEdges.rev);
+    if (!cur || differs(fresh.start, cur.start) || differs(fresh.end, cur.end) || differs(fresh.exact, cur.exact) || fresh.startKind !== cur.startKind || fresh.endKind !== cur.endKind) {
+      ogEdges.list[i] = fresh; changed = true; calm = 0;
+    } else if (i >= hint && ++calm >= 3 && !changed) {
+      for (const j of [...ogEdges.dirty]) if (j > i) ogEdges.dirty.delete(j);
+      break;
+    }
+  }
+  for (const i of [...ogEdges.dirty]) if (i < 0 || i >= n) ogEdges.dirty.delete(i);
+  if (changed) { ogSoftRelayout(); return; }                       // 남은 쪽은 배치 계산(ogPageEdges)이 이어서 잰다
+  if (ogEdges.dirty.size) { clearTimeout(ogEdges.refreshTimer); ogEdges.refreshTimer = setTimeout(ogRefreshEdges, 30); }
+}
 function ogRelayout() {
   // 창 크기가 그대로면 편집 화면이 배치를 다시 계산하지 않으므로, 같은 배율로 확대/축소 변경 신호를 보내 다시 계산시킨다
   const og = window.__ogolgyeStudio, vm = og && og.inputHandler && og.inputHandler.viewportManager;
@@ -1286,6 +1416,68 @@ function ogOpenAiTool(tool, preview = false) {
   const source = preview ? { text: "안녕하세요. 만나서 반갑습니다.", segments: [], kind: "preview" } : selected?.text ? selected : ogPageSource(); ogApiSet(input, source.text); input.__ogSource = source; panel.__ogSource = source;
   ogApiSet(panel.querySelector(".og-ai-output"), preview ? "Hello. Nice to meet you." : ""); const status = panel.querySelector(".og-ai-status"); if (status) status.textContent = preview ? "디자인 미리보기 · API는 호출하지 않았습니다." : selected?.text ? "선택한 글을 가져왔습니다." : "현재 페이지의 글을 가져왔습니다."; panel.hidden = false;
 }
+// ── 칸 바탕색(서식 줄의 단추) ────────────────────────────────────
+// 편집기에는 "표 > 셀 테두리/배경" 창이 있지만 메뉴 안쪽에 있어 찾기 어렵다(칸 색을 바꾸는 기능이 없는 줄 알았다).
+// 표 칸에 커서를 두거나 칸을 여러 개 고른 뒤 이 단추에서 색을 고르면 바로 칠한다. 되돌리기 한 번에 되돌아간다.
+const OG_CELL_COLORS = ["#ffffff", "#f2f2f2", "#d9d9d9", "#a6a6a6", "#595959", "#000000", "#fde9d9", "#fff2cc", "#e2efda", "#ddebf7", "#e4dfec", "#f8cbad", "#ffe699", "#c6e0b4", "#bdd7ee", "#ccc0da", "#c00000", "#ffc000", "#70ad47", "#2e75b6", "#7030a0"];
+function ogCellTargets() {
+  const og = window.__ogolgyeStudio || {}, ih = og.inputHandler;
+  if (!ih || !og.wasm) return null;
+  let pos; try { pos = ih.getCursorPosition?.() ?? ih.cursor.getPosition(); } catch { return null; }
+  if (!pos || pos.parentParaIndex === undefined || pos.controlIndex === undefined || pos.cellIndex === undefined) return null;
+  const t = { sec: pos.sectionIndex, ppi: pos.parentParaIndex, ci: pos.controlIndex, cells: [pos.cellIndex] };
+  try {
+    const range = ih.isInCellSelectionMode?.() ? ih.getSelectedCellRange?.() : null;
+    if (range) {
+      const picked = og.wasm.getTableCellBboxes(t.sec, t.ppi, t.ci).filter((b) => b.row <= range.endRow && b.row + Math.max(1, b.rowSpan) - 1 >= range.startRow && b.col <= range.endCol && b.col + Math.max(1, b.colSpan) - 1 >= range.startCol).map((b) => b.cellIdx);
+      if (picked.length) t.cells = [...new Set(picked)];
+    }
+  } catch { /* 고른 범위를 못 읽으면 커서가 있는 칸만 */ }
+  return t;
+}
+// color: "#rrggbb" 또는 null(바탕 없음)
+function ogSetCellFill(color) {
+  const og = window.__ogolgyeStudio || {}, ih = og.inputHandler, t = ogCellTargets();
+  if (!t) return false;
+  const props = color ? { fillType: "solid", fillColor: color } : { fillType: "none" };
+  ih.executeOperation({ kind: "snapshot", operationType: "cellFill", operation: (wasm) => {
+    const run = () => { for (const c of t.cells) wasm.setCellProperties(t.sec, t.ppi, t.ci, c, props); };
+    if (typeof wasm.runInBatch === "function") wasm.runInBatch(run); else run();
+    return ih.cursor.getPosition();
+  } });
+  return true;
+}
+function ogInstallCellFill() {
+  const alignHost = document.querySelector(".sb-overflow-host"), track = alignHost?.parentElement;
+  if (!alignHost || !track) return false;
+  if (track.querySelector(".og-cell-fill")) return true;
+  const btn = document.createElement("button");
+  btn.type = "button"; btn.className = "sb-btn og-cell-fill"; btn.title = "칸 바탕색 (표 칸에 커서를 두거나 칸을 고른 뒤)";
+  btn.innerHTML = '<span class="og-cell-fill-icon"></span>';
+  const pop = document.createElement("div");
+  pop.className = "og-cell-fill-pop"; pop.hidden = true;
+  pop.innerHTML = '<div class="og-cell-fill-grid">' + OG_CELL_COLORS.map((c) => `<button type="button" data-color="${c}" title="${c}" style="background:${c}"></button>`).join("") + '</div>'
+    + '<div class="og-cell-fill-row"><button type="button" data-color="">바탕 없음</button><label>다른 색 <input type="color" value="#ffff00"></label></div><div class="og-cell-fill-note" hidden>표 칸 안에 커서를 두세요.</div>';
+  document.body.appendChild(pop);
+  const close = () => { pop.hidden = true; };
+  const apply = (color) => { const ok = ogSetCellFill(color || null); pop.querySelector(".og-cell-fill-note").hidden = ok; if (ok) close(); };
+  btn.addEventListener("mousedown", (e) => e.preventDefault());                 // 편집 화면의 커서·칸 선택을 잃지 않게
+  pop.addEventListener("mousedown", (e) => { if (e.target.tagName !== "INPUT") e.preventDefault(); });
+  btn.addEventListener("click", () => {
+    if (!pop.hidden) { close(); return; }
+    pop.querySelector(".og-cell-fill-note").hidden = !!ogCellTargets();
+    const r = btn.getBoundingClientRect();
+    pop.hidden = false;
+    pop.style.top = `${Math.round(r.bottom + 4)}px`;
+    pop.style.left = `${Math.round(Math.max(8, Math.min(r.left, innerWidth - pop.offsetWidth - 8)))}px`;
+  });
+  pop.addEventListener("click", (e) => { const b = e.target.closest("button[data-color]"); if (b) apply(b.dataset.color); });
+  pop.querySelector('input[type="color"]').addEventListener("change", (e) => apply(e.target.value));
+  document.addEventListener("mousedown", (e) => { if (!pop.hidden && !pop.contains(e.target) && !btn.contains(e.target)) close(); }, true);
+  addEventListener("keydown", (e) => { if (e.key === "Escape") close(); }, true);
+  alignHost.after(btn);
+  return true;
+}
 function ogRenderAiButtons() {
   const alignHost = document.querySelector(".sb-overflow-host"), track = alignHost?.parentElement; if (!alignHost || !track) return;
   let host = track.querySelector(".og-ai-tools"); if (!host) { host = document.createElement("div"); host.className = "og-ai-tools"; alignHost.after(host); }
@@ -1422,6 +1614,24 @@ function ogWithPaperPages(fn) {
   d.clearViewPageDefs();
   try { return fn(); } finally { ogApplyViewDefs(ogPL.view); }
 }
+// 스트리밍 PDF는 여러 메시지에 걸쳐 쪽을 한 장씩 만든다. 매 장마다 보기 배치를 왕복하지 않고
+// 시작할 때 한 번만 원래 용지 배치로 전환한 뒤 끝에서 한 번 복원한다.
+let ogPdfExportRestore = null;
+function ogEndPdfExport() {
+  const restore = ogPdfExportRestore; ogPdfExportRestore = null;
+  if (restore) restore();
+}
+function ogBeginPdfExport() {
+  ogEndPdfExport();
+  ogMarkViewMode();
+  const w = ogW(), d = ogViewEngine();
+  if (!w || !ogDoc()) throw new Error("열린 문서가 없습니다.");
+  if (ogPL.active && d) {
+    d.clearViewPageDefs();
+    ogPdfExportRestore = () => ogApplyViewDefs(ogPL.view);
+  }
+  return { pageCount: w.pageCount };
+}
 // 문서 전체 HTML: 엔진의 문단 HTML 뽑기(exportSelectionHtml)는 글자만 담고 표·그림이 든 문단을 빠뜨리므로,
 // 문단을 하나씩 돌면서 글자(문단 HTML) · 표(exportControlHtml) · 그림(getControlImageData)을 원래 순서대로 모은다.
 function ogExportContext(d) {
@@ -1487,6 +1697,22 @@ function ogDocumentHtml(w, range = null, context = null) {       // range: { fro
     sections.push(`<section class="og-section" data-section="${sec + 1}">${parts.join("\n")}</section>`);
   }
   return sections.join("\n");
+}
+// 내보내기 HTML 의 그림(data:…;base64,…)을 "og-img:번호" 로 바꾸고 바이트 목록을 돌려준다. 같은 그림은 한 번만 담는다.
+function ogLiftExportImages(data) {
+  const images = [], seen = new Map();
+  const lift = (html) => String(html || "").replace(/(<img\b[^>]*?\bsrc=["'])data:([^;,"']+);base64,([^"']+)(["'])/gi, (_all, before, mime, b64, quote) => {
+    let k = seen.get(b64);
+    if (k === undefined) {
+      const bin = atob(b64), bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      k = images.length; images.push({ mime, bytes }); seen.set(b64, k);
+    }
+    return before + "og-img:" + k + quote;
+  });
+  if (typeof data.html === "string") data.html = lift(data.html);
+  if (Array.isArray(data.tabs)) for (const t of data.tabs) t.html = lift(t.html);
+  return images;
 }
 function ogBuildExport(format) {
   const w = ogW(); if (!w || !ogDoc()) throw new Error("열린 문서가 없습니다.");
@@ -1923,7 +2149,7 @@ addEventListener("message", (e) => {
   ogInstallParaFormatGuard();
   ogInstallOneCharIndent();
   ogInstallPictureTools();
-  for (const install of [ogInstallTabs, ogInstallAiTools, ogInstallStyleMenu]) ogWhenReady(install);
+  for (const install of [ogInstallTabs, ogInstallAiTools, ogInstallStyleMenu, ogInstallCellFill]) ogWhenReady(install);
   const content = document.getElementById("scroll-content");
   if (content) new MutationObserver((records) => {
     // 커서·선택 표시 등 scroll-content 안의 모든 style 변경에 반응하면 입력 중

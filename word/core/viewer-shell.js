@@ -400,7 +400,7 @@ async function poll(){
 }
 // 끌어다 놓을 수 있는 그림: 글자층 안에서 글자들보다 아래에 둔다(글자 위는 글자 드래그, 그림의 빈 곳은 그림 끌기)
 let FIGS=[];
-function figHtml(n){return FIGS.filter(f=>f.page===+n).map(f=>'<div class="figgrab" draggable="true" data-page="'+f.page+'" data-img="'+f.id+'" title="끌어서 문서에 넣기" style="left:'+f.bbox[0]+'pt;top:'+f.bbox[1]+'pt;width:'+(f.bbox[2]-f.bbox[0])+'pt;height:'+(f.bbox[3]-f.bbox[1])+'pt"></div>').join('');}
+function figHtml(n){return FIGS.filter(f=>f.page===+n&&!f.listOnly).map(f=>'<div class="figgrab" draggable="true" data-page="'+f.page+'" data-img="'+f.id+'" title="끌어서 문서에 넣기" style="left:'+f.bbox[0]+'pt;top:'+f.bbox[1]+'pt;width:'+(f.bbox[2]-f.bbox[0])+'pt;height:'+(f.bbox[3]-f.bbox[1])+'pt"></div>').join('');}
 const figPreview=new Map();
 function figUrl(el){return '/pdf/'+ID+'/image/'+el.dataset.page+'/'+el.dataset.img;}
 // 그림 잡기 영역이 아닌 곳(글자 등)에서 마우스를 누르면 놓을 때까지 그림 잡기를 끈다

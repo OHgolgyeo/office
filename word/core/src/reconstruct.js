@@ -1,9 +1,11 @@
 // PDF 글자(glyph) → 줄 → 단(column) → 문단 → 줄바꿈 이음새 판정.
 // PDF 엔진과 무관하다. 입력은 extract-*.js 가 만든 { pages: [{width,height,glyphs}] }.
 //
-// 원칙(조건 3): 글자는 절대 바꾸지 않는다. 이 모듈이 결정하는 것은
+// 원칙(조건 3): 글자는 절대 임의로 바꾸지 않는다. 이 모듈이 결정하는 것은
 //   (1) 줄 사이 이음새에 공백을 넣을지, (2) 줄 끝 하이픈을 뺄지, (3) 문단 경계
-// 세 가지뿐이고, 모든 결정은 joins[] 에 근거와 확신도와 함께 기록된다.
+// 세 가지뿐이다. 단, PDF의 잘못된 ToUnicode 때문에 큰따옴표 모양이 ASCII 아포스트로
+// 들어온 경우처럼 문장 구조로 확정할 수 있는 문장부호는 원문(rawC)과 근거를 남겨 복구한다.
+// 모든 결정은 joins[] 또는 glyph.punctuationRepair 에 근거와 함께 기록된다.
 // verifyIntegrity() 가 이를 기계적으로 검사한다.
 
 // ───────── 문자 분류 ─────────
@@ -61,6 +63,139 @@ export const DEFAULTS = {
   dropFurniture: true,   // 머리글/꼬리글/쪽번호를 본문에서 분리
   sentenceEndDoubt: true, // 문장이 줄 끝에서 끝나는 곳을 "새 문단일 수도 있음"으로 표시
 };
+
+// ───────── PDF 문장부호 복구 ─────────
+// PDF에서 보이는 글리프와 복사되는 유니코드가 다른 경우가 흔하다. 특히 한국어 책의 “ ”가
+// 둘 다 ASCII '로 매핑되기도 한다. 이미 올바른 곡선 인용부호는 건드리지 않고, ASCII 따옴표만
+// 짝·문장 문맥으로 방향과 종류를 확정한다. 반환 문자열은 반드시 입력과 길이가 같다.
+const WORD_CHAR = /[0-9A-Za-z가-힣ㄱ-ㅎㅏ-ㅣ一-龥ぁ-ゟ゠-ヿ]/;
+const LATIN_WORD = /[A-Za-zÀ-ɏ]/;
+const OPEN_SIDE = /[\s([{<「『《〈—–-]/;
+const CLOSE_SIDE = /[\s.,!?;:…。？！、，)\]}>」』》〉—–-]/;
+const SENTENCE_MARK = /[.!?…。？！]/;
+const SPEECH_AFTER = /^(?:이라고|라고|하고|하며|하면서|물었|말했|말하|대답|외쳤|소리쳤|속삭였|되물었|답했)/;
+const LEADING_APOSTROPHE_WORD = /^(?:tis|twas|cause|em|round|bout|til)\b/i;
+
+const prevNonSpace = (s, at) => { for (let i = at - 1; i >= 0; i--) if (!/\s/.test(s[i])) return { c: s[i], i }; return null; };
+const nextNonSpace = (s, at) => { for (let i = at + 1; i < s.length; i++) if (!/\s/.test(s[i])) return { c: s[i], i }; return null; };
+const isWord = (c) => !!c && WORD_CHAR.test(c);
+
+/** ASCII 따옴표를 한국어 문장 구조에 맞는 방향성 인용부호로 복구한다. */
+export function repairPunctuationText(source) {
+  const s = String(source || ""), out = s.split("");
+  const doubleSpans = [];
+  const orientCurly = (left, right) => {
+    // 이 보정은 여는·닫는 부호가 PDF 에서 한 가지 모양으로만 들어온 글(둘 다 ” 이거나 둘 다 “)을 위한 것이다. 두 방향이 함께
+    // 있으면 원문이 이미 구분해 쓴 것이니 손대지 않는다 — 문맥 추측으로 고치면 올바른 부호가 뒤집힌다(`‘ ’로`, `…주소서.”`).
+    // 인용부호가 아닌 작은따옴표: 영어 축약·소유격(don’t, O’Reilly), 연도 줄임(’22년, ’99)
+    const apostrophe = (i) => left === "‘" && ((LATIN_WORD.test(s[i - 1] || "") && LATIN_WORD.test(s[i + 1] || "")) || /\d/.test(s[i + 1] || ""));
+    let lefts = 0, rights = 0;
+    for (let i = 0; i < s.length; i++) {
+      if ((s[i] !== left && s[i] !== right) || apostrophe(i)) continue;
+      if (s[i] === left) lefts++; else rights++;
+    }
+    if (!((lefts === 0 && rights >= 2) || (rights === 0 && lefts >= 2))) return;
+    const stack = [];
+    for (let i = 0; i < s.length; i++) {
+      if ((s[i] !== left && s[i] !== right) || apostrophe(i)) continue;
+      // 바로 앞·뒤 글자로 본다. 공백을 건너뛴 앞 글자로 보면 `어미 ‘-다가’` 의 여는 부호(공백 뒤)를 여는 자리로 알아보지 못한다.
+      const before = i > 0 ? s[i - 1] : "", after = i + 1 < s.length ? s[i + 1] : "";
+      const opens = (!before || OPEN_SIDE.test(before) || /["'“‘]/.test(before)) && !!after && !/\s/.test(after);
+      const closes = !!before && !/\s/.test(before) && (!after || CLOSE_SIDE.test(after));
+      if (opens && !closes) { out[i] = left; stack.push(i); continue; }
+      // 문맥상 닫는 자리(문장 끝 등)는 여는 짝이 이 묶음 안에 없어도 닫는 부호다 — 인용이 앞줄·앞 문단에서 시작됐을 뿐이다.
+      // 예전에는 짝이 없으면 무조건 여는 부호로 바꿔, 올바른 `…주소서.”` 가 `…주소서.“` 로 뒤집혔다.
+      if (closes && !opens) { out[i] = right; if (stack.length) stack.pop(); continue; }
+      if (stack.length) { out[i] = right; stack.pop(); }
+      else if (s[i] === left) stack.push(i);                        // 판단할 근거가 없으면 원래 부호를 그대로 둔다(`사항”은`)
+    }
+  };
+  orientCurly("“", "”");
+  orientCurly("‘", "’");
+  const pairsOf = (mark) => {
+    const pairs = [], stack = [];
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] !== mark) continue;
+      const p = prevNonSpace(s, i), n = nextNonSpace(s, i);
+      // 영어 축약형·소유격(O'Reilly, don't)과 숫자 단위(5' 10")는 인용부호가 아니다.
+      if (mark === "'" && p && n && LATIN_WORD.test(p.c) && LATIN_WORD.test(n.c)) continue;
+      if ((p && /\d/.test(p.c)) || (n && /\d/.test(n.c))) continue;
+      if (mark === "'" && !p && n && LATIN_WORD.test(n.c) && LEADING_APOSTROPHE_WORD.test(s.slice(n.i))) continue;
+      const opens = (!p || OPEN_SIDE.test(p.c)) && !!n && (isWord(n.c) || /["'“‘]/.test(n.c));
+      const closes = !!p && (isWord(p.c) || /[.!?…。？！”’"')\]}>」』》〉]/.test(p.c)) && (!n || CLOSE_SIDE.test(n.c));
+      if (opens && !closes) { stack.push(i); continue; }
+      if (closes && stack.length) { pairs.push([stack.pop(), i]); continue; }
+      // 양쪽 모두 가능한 경우에는 열린 짝이 있으면 닫고, 없으면 연다.
+      if (stack.length) pairs.push([stack.pop(), i]); else stack.push(i);
+    }
+    return { pairs: pairs.sort((a, b) => a[0] - b[0]), unmatched: stack };
+  };
+
+  const doubles = pairsOf('"');
+  for (const [a, b] of doubles.pairs) {
+    const content = s.slice(a + 1, b);
+    if (!/[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(content)) continue;       // 영문 문서의 의도적인 straight quote는 보존
+    out[a] = "“"; out[b] = "”"; doubleSpans.push([a, b]);
+  }
+  for (const a of doubles.unmatched) {
+    const p = prevNonSpace(s, a), n = nextNonSpace(s, a);
+    if (/[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(s.slice(Math.max(0, a - 30), a + 80))) out[a] = (!p || OPEN_SIDE.test(p.c)) && n ? "“" : "”";
+  }
+
+  const singles = pairsOf("'");
+  for (const [a, b] of singles.pairs) {
+    const content = s.slice(a + 1, b), after = s.slice(b + 1).trimStart();
+    if (!/[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(content)) continue;       // 영문 single quote와 아포스트로피 표기는 보존
+    const nested = doubleSpans.some(([x, y]) => x < a && b < y);
+    // 문장 종결 기호가 든 인용이나 뒤에 발화 동사가 오는 인용은 직접화법 → 큰따옴표.
+    // 큰따옴표 안쪽 또는 짧은 낱말·구절 인용은 작은따옴표로 유지한다.
+    const direct = !nested && (SENTENCE_MARK.test(content) || SPEECH_AFTER.test(after));
+    out[a] = direct ? "“" : "‘"; out[b] = direct ? "”" : "’";
+  }
+  for (const a of singles.unmatched) {
+    const p = prevNonSpace(s, a), n = nextNonSpace(s, a), rest = s.slice(a + 1);
+    if (!/[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(s.slice(Math.max(0, a - 30), a + 100))) continue;
+    if ((!p || OPEN_SIDE.test(p.c)) && n) out[a] = SENTENCE_MARK.test(rest) ? "“" : "‘";
+    else if (p && (!n || CLOSE_SIDE.test(n.c))) out[a] = "’";
+  }
+  return out.join("");
+}
+
+function repairLinePunctuation(lines, joins = []) {
+  let repaired = 0;
+  const groups = [];
+  let group = [];
+  lines.forEach((line, i) => {
+    if (i && joins[i - 1]?.kind === "para") { if (group.length) groups.push(group); group = []; }
+    group.push({ line, join: i ? joins[i - 1] : null });
+  });
+  if (group.length) groups.push(group);
+  for (const entries of groups) {
+    let text = ""; const refs = [];
+    entries.forEach(({ line, join }, li) => {
+      if (li && join?.kind === "space") { text += " "; refs.push(null); }
+      line.glyphs.forEach((g, i) => {
+        if (i && line.gaps[i - 1]?.isSp) { text += " "; refs.push(null); }
+        text += g.c; refs.push(g);
+      });
+    });
+    const fixed = repairPunctuationText(text);
+    for (let i = 0; i < fixed.length; i++) {
+      const g = refs[i];
+      if (!g || fixed[i] === text[i]) continue;
+      if (g.rawC === undefined) g.rawC = g.c;
+      g.c = fixed[i]; g.punctuationRepair = `PDF 인용부호 ${text[i]} → ${fixed[i]}`; repaired++;
+    }
+  }
+  // glyph를 고친 뒤 화면 글자층과 문서화가 같은 문자열을 사용하도록 줄 문자열도 다시 만든다.
+  for (const line of lines) {
+    let text = "";
+    line.glyphs.forEach((g, i) => { if (i && line.gaps[i - 1]?.isSp) text += " "; text += g.c; });
+    if (line.cells) line.cells = line.cells.map(repairPunctuationText);
+    line.text = line.cells ? line.cells.join("\t") : text;
+  }
+  return repaired;
+}
 
 /**
  * @returns {{
@@ -124,7 +259,13 @@ export function reconstruct(input, opts = {}) {
     const justifiedByStretch = !justifiedByEdge && ref.length >= 3 && bestN >= 2 && nearMiss <= 1
       && bestX >= Math.max(...ref.map((m) => m.x1)) - tolR
       && ref.filter((m) => Math.abs(m.x1 - bestX) <= tolR && stretched(m)).length >= 2;
-    const R = justifiedByEdge || justifiedByStretch ? Math.max(...cluster) : Math.max(...ref.map((l) => l.x1));
+    let R = justifiedByEdge || justifiedByStretch ? Math.max(...cluster) : Math.max(...ref.map((l) => l.x1));
+    // 1칸 글상자 안의 글: 쓸 수 있는 폭은 상자 안쪽(왼쪽 안쪽 여백만큼 오른쪽에서도 들어온 자리)까지다. 줄들 가운데 가장 긴 줄을
+    // 오른쪽 끝으로 삼으면 상자 안의 시·대사처럼 일부러 짧게 끊은 줄들이 "꽉 찬 줄"로 보여 한 문단으로 붙었다.
+    if (gl[0].cell) {
+      const box = (input.pages[gl[0].page]?._tables || []).find((t) => t.id === gl[0].cell.t);
+      if (box && box.edge && box.rows.length === 1 && box.rows[0].cells.length === 1) R = Math.max(R, box.bbox[2] - Math.max(0, L - box.bbox[0]));
+    }
     const pitches = [];
     for (let i = 1; i < ref.length; i++) {
       const d = ref[i].oy - ref[i - 1].oy;
@@ -163,12 +304,17 @@ export function reconstruct(input, opts = {}) {
       if (near.length > axisN && sameX0 <= Math.max(1, near.length / 3)) { axisN = near.length; axis = median(near.map(midOf)); }
     }
     // 표 칸 안 글과 두 줄짜리는 제외(칸 안 가운데 글은 칸 폭을 몰라 줄 바꿈을 판단할 수 없다)
-    if (gl[0].cell || axisN < 3 || axisN < gl.length * 0.5) axis = null;
+    // 다만 덩이의 모든 줄이 그 축에 가운데가 모이면 줄이 둘이어도 축이다: 가운데 정렬한 짧은 글(헌사 세 줄)에서 가장 긴 줄은
+    // 덩이의 왼쪽·오른쪽 끝을 스스로 정해 "안쪽으로 들어간 줄"로 세어지지 않았고, 그래서 그 줄만 왼쪽 정렬로 나왔다.
+    // (왼쪽 정렬 글은 줄 길이가 다르면 가운데도 다르므로, 길이가 다른 줄들의 가운데가 모두 같으면 가운데 정렬이다.)
+    const allOnAxis = axis != null && axisN >= 2 && gl.length >= 3 && gl.every((m) => Math.abs(midOf(m) - axis) < m.size * 0.6);
+    if (gl[0].cell || (!allOnAxis && (axisN < 3 || axisN < gl.length * 0.5))) axis = null;
     for (const l of gl) {
       l.axis = axis;
       l.groupMaxW = Math.max(...gl.map((m) => m.x1 - m.x0));
       l.tableGroup = tableGroup;
       l.L = L; l.R = R; l.pitch = pitches.length ? pct(pitches, 0.3) : l.size * 1.5; l.justified = justified; l.hang = hang;
+      l.pitchN = pitches.length;
       // 양쪽 정렬 단의 줄 안에 글자 1.8개 이상 빈 곳 = 텍스트층에 없는 글자 의심
       l.suspectGaps = justified && !l.cells && Math.abs(l.size - bodySize) < bodySize * 0.12
         ? l.gaps.filter((g) => {
@@ -180,8 +326,46 @@ export function reconstruct(input, opts = {}) {
       const bulletLines = gl.filter((q) => q.symbolBullet || BULLET_CHARS.test(q.glyphs[0].c) || BULLET.test(q.text.split(" ")[0])).length;
       if (isBulletLine && bulletLines >= 2 && l.x0 - L < l.size * 2 && hang !== null && l.contentStart - hang > l.size * 1.2 && !l.suspectGaps.length) l.suspectGaps.push(l.text.indexOf(l.text.split(" ")[0]) + 1);
     }
+    // 좁은 글 덩이의 오른쪽 끝: 한 단 안에서도 글 덩이가 단보다 좁을 수 있다(그림 옆으로 꺾인 글, 카드 안에서 좁게 놓인 글).
+    // 단 전체의 오른쪽 끝(R)으로 재면 그 덩이의 꽉 찬 줄이 "여유가 많은데 일부러 끊은 줄"로 보여 줄마다 문단이 나뉘었다.
+    // 위아래로 이어진 같은 모양의 줄들(같은 크기·같은 왼쪽 끝)이 셋 이상이고 그중 둘 이상이 같은 자리에서 끝나면 그 자리를 오른쪽 끝으로 쓴다.
+    if (!tableGroup && !gl[0].cell) {
+      const sorted = gl.slice().sort((a, b) => a.oy - b.oy);
+      for (let k = 0; k < sorted.length; k++) {
+        const l = sorted[k], block = [l];
+        const alike = (a, b) => Math.abs(a.size - b.size) < a.size * 0.08 && Math.abs(a.x0 - b.x0) < a.size * 2.5 && Math.abs(b.oy - a.oy) < Math.max(a.pitch, a.size * 1.2) * 1.6;
+        for (let j = k - 1; j >= 0 && block.length < 9 && alike(block[0], sorted[j]); j--) block.unshift(sorted[j]);
+        for (let j = k + 1; j < sorted.length && block.length < 9 && alike(block.at(-1), sorted[j]); j++) block.push(sorted[j]);
+        if (block.length < 3) continue;
+        const localR = Math.max(...block.map((m) => m.x1));
+        if (localR > R - l.size * 2) continue;                       // 단의 오른쪽 끝과 거의 같다
+        // 덩이 줄의 60% 이상(적어도 둘)이 글자 하나 안쪽에서 끝나야 한다. 예전 기준(둘 이상이 글자 1.5개 안쪽)은 시·대사·목록처럼
+        // 줄 길이가 제각각인 덩이에서도 우연히 맞아, 릴리스에서는 따로였던 시 구절·목록 항목·다음 쪽 첫 줄이 한 문단으로 붙었다.
+        const reach = block.filter((m) => m.x1 >= localR - m.size).length;
+        if (reach < 2 || reach < block.length * 0.6) continue;
+        // 덩이가 단 폭의 35%도 안 되면 꺾인 글이 아니라 짧은 항목들이다("글 @이름 / 그림 @이름" 같은 제작진 목록 — 길이가 비슷해
+        // 덩이 끝이 있는 것처럼 보여 한 문단으로 붙었다).
+        if (localR - L < (R - L) * 0.35) continue;
+        l.localR = localR;
+      }
+      // (l.R 은 단의 오른쪽 끝 그대로 둔다. 예전에는 l.R 을 덩이 끝으로 바꿔 놓아, 단 끝을 기준으로 하는 다른 판단 — 굵기 변화,
+      //  글머리 기호, 가운데 정렬 — 까지 달라졌다: 덩이 끝을 넘는 긴 줄(URL) 뒤의 굵은 제목이 앞 줄에 붙고, "…이루어집니다:" 뒤 첫 항목이 붙었다.)
+    }
   }
 
+  // 줄 간격을 잴 줄이 모자란 묶음(같은 크기로 이어진 줄 쌍이 3개 미만, 또는 8개 미만인데 간격이 문서 보통의 1.6배·글자의 2.2배를 넘음):
+  // 표·글상자가 대부분인 쪽에 남은 제목·한 줄 문단들은
+  // 서로의 간격(문단 사이 간격)이 곧 "줄 간격"으로 잡혀, 벌어진 줄을 가르지 못하고 제목이 다음 줄과 붙었다.
+  // 줄이 넉넉한 묶음들에서 얻은 문서의 줄 간격 비율(줄 간격 ÷ 글자 크기)을 넘지 않게 한다.
+  const ratios = lines.filter((l) => l.pitchN >= 4 && !l.cell).map((l) => l.pitch / l.size);
+  if (ratios.length >= 8) {
+    const docRatio = median(ratios);
+    for (const l of lines) {
+      // (표 칸 안은 줄 간격이 글자의 3배를 넘는 터무니없는 값일 때만 — 상자 안에 멀리 떨어진 두 줄뿐이면 그 사이가 "줄 간격"이 된다)
+      if ((l.cell && l.pitch <= l.size * 3) || l.pitch <= l.size * docRatio * 1.15) continue;
+      if (l.pitchN < 3 || (l.pitchN < 8 && l.pitch > l.size * Math.max(docRatio * 1.6, 2.2))) l.pitch = l.size * docRatio * 1.15;
+    }
+  }
   const spaceW = estimateSpaceWidth(lines, bodySize);
   for (const l of lines) l.natEnd = naturalEnd(l, spaceW);
 
@@ -224,6 +408,10 @@ export function reconstruct(input, opts = {}) {
   const joins = pairs.map((p) => decideJoin(p, mode, spaceW, dict, spaceRatio, o));
 
   if (o.spacer && mode === "char") refineWithSpacer(joins, lines, dict, o);
+
+  // 줄·단·문단 경계를 모두 판정한 뒤에만 따옴표를 복구한다. 문장부호 보정이 줄바꿈 판단을
+  // 거꾸로 바꾸지 않으며, 화면 글자층과 문서화 결과에는 같은 보정값이 들어간다.
+  const punctuationRepairs = repairLinePunctuation(lines, joins) + repairLinePunctuation(furniture);
 
   // ── 문단 조립
   const paragraphs = [];
@@ -364,7 +552,16 @@ export function reconstruct(input, opts = {}) {
         const l = lines[p.lines[0]];
         return l.page === page.index && l.oy - l.size > b[1] && l.x1 > b[0] && l.x0 < b[2];
       });
-      if (before < 0) { const last = paragraphs.map((p, k) => [p, k]).filter(([p]) => p.page === page.index).at(-1); before = last ? last[1] + 1 : paragraphs.length; }
+      if (before < 0) {
+        const last = paragraphs.map((p, k) => [p, k]).filter(([p]) => p.page === page.index).at(-1);
+        if (last) before = last[1] + 1;
+        else {
+          // 그 쪽에 글이 하나도 없으면(표지, 그림만 있는 쪽) 뒤쪽 쪽의 첫 문단 앞에 놓는다. 예전에는 "문서 맨 끝"으로 처리해
+          // 표지 그림이 문서 마지막으로 갔다.
+          const next = paragraphs.findIndex((p) => p.page > page.index);
+          before = next >= 0 ? next : paragraphs.length;
+        }
+      }
       // overlay: 겹쳐 저장된 조각을 묶은 그림 — 그 조각들만(종이 배경·글자 없이) 한 장으로 그린다(session.js)
       const overlay = !single && parts.some((x) => x.overlay);
       // ids: 이 그림을 이루는 그림 조각들 — 보이는 그대로 그릴 때 이것 말고 다른 그림(종이 배경 등)은 숨긴다(session.js)
@@ -409,6 +606,7 @@ export function reconstruct(input, opts = {}) {
       imageTextChars,
       italicChars: input.pages.reduce((n, p) => n + p.glyphs.filter((g) => g.italic && !isSpace(g.c)).length, 0),
       unicodeErrors: input.pages.reduce((n, p) => n + p.glyphs.filter((g) => g.unicodeError).length, 0),
+      punctuationRepairs,
     },
     _dropped: dropped,
   };
@@ -499,28 +697,64 @@ const inBox = (b, x, y) => x > b[0] && x < b[2] && y > b[1] && y < b[3];
 // ───────── 선으로 그은 표(격자 표) ─────────
 // PDF의 선·사각형에서 세로선/가로선을 모아 표 영역과 칸을 만든다.
 // 칸 = 가로선 사이 띠(행) × 그 띠를 실제로 지나는 세로선 사이(병합된 칸은 세로선이 없으므로 자연히 합쳐짐)
+const ink3s = (c) => Array.isArray(c) && c.slice(0, 3).some((v) => v < 245);
 function detectTables(page) {
   const V = [], Hs = [];
   const inkAll = page.glyphs.filter((g) => !isSpace(g.c));
   page._highlights = [];
+  const lineBoxes = [];
+  // 한 줄짜리 글상자: 표와 겹치지 않고(표 칸의 테두리·<보기> 이름표가 아님) 같은 줄 옆에 다른 글이 없으면(문장 속 네모 친 낱말이 아님)
+  // 1칸 표, 아니면 예전처럼 글자 배경으로 둔다.
+  const withLineBoxes = (tables) => {
+    for (const { b, edge } of lineBoxes) {
+      const hit = tables.some((t) => t.bbox[0] < b[2] && b[0] < t.bbox[2] && t.bbox[1] < b[3] && b[1] < t.bbox[3]);
+      const beside = inkAll.some((g) => { const cx = (g.x0 + g.x1) / 2, cy = (g.y0 + g.y1) / 2; return cy > b[1] && cy < b[3] && (cx < b[0] - 2 || cx > b[2] + 2); });
+      if (hit || beside) page._highlights.push(b);
+      else tables.push({ id: tables.length, bbox: b, rows: [{ y0: b[1], y1: b[3], cells: [{ x0: b[0], x1: b[2] }] }], hlines: [[b[1], b[0], b[2]], [b[3], b[0], b[2]]], edge });
+    }
+    return tables;
+  };
   for (const p of page.paths || []) {
     const [x0, y0, x1, y1] = p.bbox, w = x1 - x0, h = y1 - y0;
+    // faint: 흰색에 가까운 선·칠(보이지 않는 도형)
+    const ink3 = (c) => Array.isArray(c) && c.slice(0, 3).some((v) => v < 245);
+    const faint = !(ink3(p.stroke) || ink3(p.fill));
+    // edge: 눈에 보이는 테두리 선의 색(가는 사각형으로 그은 선은 칠 색이 곧 선 색). 칠만 있는 도형은 테두리가 없다(null)
+    const thin = (w <= 3 && h >= 8) || (h <= 3 && w >= 8);
+    // 굵은 선 한 줄로 그은 띠(선 굵기가 도형 짧은 변의 40% 이상 — 굵기 10pt 선으로 칠한 형광펜)와 칠이 함께 있는 도형은
+    // 테두리가 아니라 글자 배경색이다. 글자 배경색은 표도 상자도 아니다.
+    const band = !thin && (p.strokeWidth || 0) >= Math.min(w, h) * 0.4;      // (가는 선 자체는 띠가 아니다)
+    const outline = ink3(p.stroke) && !band;
+    const edge = outline ? p.stroke.slice(0, 3) : thin && ink3(p.fill) ? p.fill.slice(0, 3) : null;
     // 글자 배경색(형광펜·음영): 높이가 한 줄 정도이고 안에 글자가 딱 한 줄만 있는 사각형 → 표의 선이 아니다
+    // (테두리 선을 그은 사각형은 배경색이 아니라 상자다 — 한 줄짜리 글상자)
     if (w > 8 && h > 3) {
       const inside = inkAll.filter((g) => { const cx = (g.x0 + g.x1) / 2, cy = (g.y0 + g.y1) / 2; return cx > x0 && cx < x1 && cy > y0 && cy < y1; });
       if (inside.length) {
         const sz = median(inside.map((g) => g.size));
         const oys = inside.map((g) => g.oy);
-        if (h <= sz * 2.0 && Math.max(...oys) - Math.min(...oys) < sz * 0.5) { page._highlights.push([x0, y0, x1, y1]); continue; }
+        if (h <= sz * 2.0 && Math.max(...oys) - Math.min(...oys) < sz * 0.5) {
+          // 테두리 선을 그은 사각형은 한 줄짜리 글상자 후보 — 다른 선과 묶지 않고 맨 끝에서 따로 판단한다(lineBoxes)
+          if (outline && !ink3(p.fill) && w > sz * 4 && inside.length >= 2) lineBoxes.push({ b: [x0, y0, x1, y1], edge }); else page._highlights.push([x0, y0, x1, y1]);
+          continue;
+        }
       }
     }
-    if (w <= 3 && h >= 8) V.push({ x: (x0 + x1) / 2, y0, y1 });
-    else if (h <= 3 && w >= 8) Hs.push({ y: (y0 + y1) / 2, x0, x1 });
+    if (w <= 3 && h >= 8) V.push({ x: (x0 + x1) / 2, y0, y1, faint, edge });
+    else if (h <= 3 && w >= 8) Hs.push({ y: (y0 + y1) / 2, x0, x1, faint, edge });
     else if (w > 8 && h > 8 && w < page.width * 0.95 && h < page.height * 0.95) {     // 사각형 테두리 → 네 변
-      V.push({ x: x0, y0, y1 }, { x: x1, y0, y1 }); Hs.push({ y: y0, x0, x1 }, { y: y1, x0, x1 });
+      const rb = [x0, y0, x1, y1];                 // rb: 이 변이 나온 도형의 상자
+      V.push({ x: x0, y0, y1, box: 1, faint, edge, rb }, { x: x1, y0, y1, box: 1, faint, edge, rb }); Hs.push({ y: y0, x0, x1, box: 1, faint, edge, rb }, { y: y1, x0, x1, box: 1, faint, edge, rb });   // box: 선이 아니라 도형의 테두리 상자
     }
   }
-  if (V.length < 3) return [];
+  // 바탕 칠과 같은 색으로 그은 가는 선은 보이지 않는다(워드·한글의 음영 문단/칸은 바탕과 같은 색 테두리를 함께 그린다).
+  // 그런 선을 테두리로 세면 음영만 깔린 글(글자 배경색)이 "선으로 두른 상자"가 되어 1칸 표로 나왔다.
+  const fillsBg = (page.paths || []).filter((p) => !ink3s(p.stroke) && ink3s(p.fill) && p.bbox[2] - p.bbox[0] > 8 && p.bbox[3] - p.bbox[1] > 8);
+  const sameAsBg = (sg, x0, y0, x1, y1) => fillsBg.some((p) => p.bbox[0] - 2 <= x0 && p.bbox[2] + 2 >= x1 && p.bbox[1] - 2 <= y0 && p.bbox[3] + 2 >= y1
+    && sg.edge.reduce((d, v, k) => d + Math.abs(v - p.fill[k]), 0) <= 12);
+  for (const v of V) if (v.edge && !v.box && sameAsBg(v, v.x, v.y0, v.x, v.y1)) v.edge = null;
+  for (const h of Hs) if (h.edge && !h.box && sameAsBg(h, h.x0, h.y, h.x1, h.y)) h.edge = null;
+  if (V.length < 3) return withLineBoxes([]);
   // 서로 닿는 선끼리 묶기
   const segs = [...V.map((v) => ({ b: [v.x - 1, v.y0 - 1, v.x + 1, v.y1 + 1], v })), ...Hs.map((h) => ({ b: [h.x0 - 1, h.y - 1, h.x1 + 1, h.y + 1], h }))];
   const parent = segs.map((_, i) => i);
@@ -531,7 +765,18 @@ function detectTables(page) {
   segs.forEach((sg, i) => { const r = find(i); if (!comps.has(r)) comps.set(r, []); comps.get(r).push(sg); });
   const ink = page.glyphs.filter((g) => !isSpace(g.c));
   const tables = [];
-  for (const cs of comps.values()) {
+  for (const all of comps.values()) {
+    // 선으로 그린 한 칸 상자에 배경색 도형(테두리 없는 칠 — 음영 띠 위의 소제목)이 바깥에서 닿아 있으면 그 도형은 뺀다.
+    // 넣어 두면 띠와 상자가 한 표로 엮여(띠 = 첫 행, 상자 = 양옆에 빈 칸이 달린 둘째 행) 소제목이 표에 붙고 빈 칸이 생겼다.
+    let cs = all;
+    const lined = all.filter((c) => (c.v || c.h).edge);
+    if (lined.length && lined.length < all.length) {
+      const lx = [...new Set(lined.filter((c) => c.v).map((c) => Math.round(c.v.x)))].sort((a, b) => a - b).filter((x, k, a) => k === 0 || x - a[k - 1] > 3);
+      if (lx.length === 2) {
+        const ex0 = Math.min(...lined.map((c) => c.b[0])), ey0 = Math.min(...lined.map((c) => c.b[1])), ex1 = Math.max(...lined.map((c) => c.b[2])), ey1 = Math.max(...lined.map((c) => c.b[3]));
+        cs = all.filter((c) => { const sg = c.v || c.h, r = sg.rb; return sg.edge || !r || !(r[3] <= ey0 + 3 || r[1] >= ey1 - 3 || r[2] <= ex0 + 3 || r[0] >= ex1 - 3); });
+      }
+    }
     const vs = cs.filter((c) => c.v).map((c) => c.v), hs = cs.filter((c) => c.h).map((c) => c.h);
     const bx0 = Math.min(...cs.map((c) => c.b[0])), by0 = Math.min(...cs.map((c) => c.b[1])), bx1 = Math.max(...cs.map((c) => c.b[2])), by1 = Math.max(...cs.map((c) => c.b[3]));
     const uniqX = [...new Set(vs.map((v) => Math.round(v.x)))].sort((a, b) => a - b).filter((x, k, a) => k === 0 || x - a[k - 1] > 3);
@@ -539,16 +784,25 @@ function detectTables(page) {
     // 칸이 2개 이상은 되어야 표. 다만 1열이라도 표 폭을 가로지르는 가로줄로 행이 나뉘고, 행이 3개 이상이거나 첫 행이
     // 제목 칸처럼 낮으면(글자 크기의 3배 이하) 표다(제목 칸 + 내용 칸들로 된 능력치 상자 — 예전엔 표 없이 글만 나왔다).
     // 테두리만 있는 상자(행 1개), 큰 글상자 둘이 위아래로 붙은 것(주보의 한 단 전체 — 표로 보면 옆 단과 읽는 순서가 뒤집혔다)은 아니다
+    let boxEdge;                                   // 1칸 글상자일 때만: 테두리 색([r,g,b]) 또는 "none"(칠만 있는 음영 상자)
     if (uniqX.length < 3) {
       const fullRows = [...new Set(hs.filter((h) => h.x1 - h.x0 >= (bx1 - bx0) * 0.9).map((h) => Math.round(h.y)))].sort((a, b) => a - b).filter((y, k, a) => k === 0 || y - a[k - 1] > 3);
       const size = inside.length ? median(inside.map((g) => g.size)) : 0;
       const titled = fullRows.length >= 3 && size > 0 && fullRows[1] - fullRows[0] <= size * 3;
-      if (!(uniqX.length === 2 && (fullRows.length >= 4 || titled))) continue;
+      // 글상자(참고·안내 상자): 네 변이 닫힌 한 칸짜리 테두리 안에 글이 들어 있으면(한 줄이라도) 1칸 표로 본다. 표로 보지 않으면
+      // 상자 안 글이 단의 오른쪽 끝을 기준으로 재어져(상자 안쪽 여백만큼 덜 찬 줄 = 일부러 끊은 줄) 줄마다 문단이 갈렸고 테두리도 사라졌다.
+      // 테두리 선 없이 칠만 있는 것(글자 배경색·음영 띠)은 표가 아니다 — 글자 배경과 표는 다르다. 쪽 높이의 40%를 넘는 것(단 전체를 두른 틀)도 아니다. 흰 선·흰 칠뿐인 보이지 않는 상자, 글자 몇 개 폭의 작은 네모(체크 칸)도 아니다.
+      const oys = inside.map((g) => g.oy).sort((a, b) => a - b);
+      const textLines = oys.filter((y, k) => k === 0 || y - oys[k - 1] > size * 0.6).length;
+      const closed = uniqX.length === 2 && fullRows.length === 2 && uniqX.every((x) => vs.some((v) => Math.abs(v.x - x) <= 3 && v.y1 - v.y0 >= (by1 - by0) * 0.9));
+      const noteBox = closed && textLines >= 1 && by1 - by0 < page.height * 0.4 && bx1 - bx0 > size * (textLines >= 2 ? 8 : 4) && uniqX.every((x) => vs.some((v) => Math.abs(v.x - x) <= 3 && v.edge));   // 양쪽 세로 변에 실제 선이 있어야 한다: 칠만 있는 도형은 글자 배경색이지 상자가 아니다
+      if (!(uniqX.length === 2 && (fullRows.length >= 4 || titled || noteBox))) continue;
+      if (noteBox && !(fullRows.length >= 4 || titled)) boxEdge = cs.map((c) => (c.v || c.h).edge).find(Boolean) || "none";
       // 같은 높이의 옆에 다른 글이 많으면 나란히 놓인 상자들(연도별 계획 도표 등)이다 — 그중 하나만 표가 되면 더 어색하다
       const beside = ink.filter((g) => { const cx = (g.x0 + g.x1) / 2, cy = (g.y0 + g.y1) / 2; return cy > by0 && cy < by1 && (cx < bx0 - 2 || cx > bx1 + 2); }).length;
       if (beside > inside.length * 0.2) continue;
     }
-    if (inside.length < 4) continue;
+    if (inside.length < (uniqX.length < 3 ? 2 : 4)) continue;
     // 표 높이 안의 글자가 표 밖으로 많이 삐져나오면 표가 아니라 장식(라벨 상자 등)
     const spill = ink.filter((g) => { const cy = (g.y0 + g.y1) / 2; const cx = (g.x0 + g.x1) / 2; return cy > by0 && cy < by1 && (cx < bx0 - 2 || cx > bx1 + 2) && cx > bx0 - 40 && cx < bx1 + 40; });
     if (spill.length > inside.length * 0.1) continue;
@@ -560,10 +814,23 @@ function detectTables(page) {
       const xs = [...new Set([Math.round(bx0 + 1), ...cuts, Math.round(bx1 - 1)])].sort((a, b) => a - b).filter((x, k, a) => k === 0 || x - a[k - 1] > 3);
       rows.push({ y0: ys[r], y1: ys[r + 1], cells: xs.slice(0, -1).map((x, c) => ({ x0: x, x1: xs[c + 1] })) });
     }
+    // 글이 한 칸에 한 줄만 있으면 표가 아니라 제목을 두른 장식 틀이다(겹친 사각형·무늬 도형으로 그린 "클라이맥스" 배너가
+    // 4행 4열 표가 되어, 빈 칸들에 장식 색만 칠한 표와 그 안의 제목이 나왔다). 제목은 보통 글 줄로 나가게 둔다.
+    const filled = new Set();
+    for (const g of inside) {
+      const cx = (g.x0 + g.x1) / 2, cy = (g.y0 + g.y1) / 2;
+      const r = rows.findIndex((row) => cy >= row.y0 && cy < row.y1), c = r < 0 ? -1 : rows[r].cells.findIndex((cell) => cx >= cell.x0 && cx < cell.x1);
+      if (c >= 0) filled.add(r + ":" + c);
+    }
+    const oneLine = Math.max(...inside.map((g) => g.oy)) - Math.min(...inside.map((g) => g.oy)) < median(inside.map((g) => g.size)) * 0.6;
+    // (1열짜리 "제목 칸 + 빈 내용 칸" 상자는 위에서 표로 보기로 한 것이라 그대로 둔다)
+    // 선을 그어 만든 것은 표다(이름·수험번호 칸처럼 빈 칸이 많은 양식) — 거의 도형 상자로만 이루어진 것(80% 이상)만 장식으로 본다.
+    const drawnOnly = cs.filter((c) => (c.v || c.h).box).length >= cs.length * 0.8;
+    if (drawnOnly && uniqX.length >= 3 && filled.size <= 1 && oneLine && rows.reduce((n, row) => n + row.cells.length, 0) >= 2) continue;
     // hlines: 가로선 [y, x0, x1] — 문서화에서 위아래로 합친 칸(선이 지나지 않는 행 경계)을 찾는 데 쓴다
-    tables.push({ id: tables.length, bbox: [bx0, by0, bx1, by1], rows, hlines: hs.map((h) => [h.y, h.x0, h.x1]) });
+    tables.push({ id: tables.length, bbox: [bx0, by0, bx1, by1], rows, hlines: hs.map((h) => [h.y, h.x0, h.x1]), ...(boxEdge ? { edge: boxEdge } : {}) });
   }
-  return tables;
+  return withLineBoxes(tables);
 }
 function cellOf(tables, g) {
   const cx = (g.x0 + g.x1) / 2, cy = (g.y0 + g.y1) / 2;
@@ -828,6 +1095,21 @@ function buildPageLines(page) {
 
   }
 
+  // 4-0) 본문 사이에 놓인 글상자: 글상자(panel) 글은 본문 흐름 뒤에 따로 모으는데(옆에 놓인 사이드바가 본문 사이에 끼지 않게),
+  // 옆에 본문 줄이 하나도 없고 위아래로 본문이 이어지는 상자는 사이드바가 아니라 문단 사이에 놓인 상자다. 그런 상자는
+  // 제자리(상자보다 아래에 오는 첫 본문 줄 앞)에 둔다 — 쪽 끝에 두면 상자가 다음 문단 뒤로 밀리고, 쪽을 넘어 이어지는 문단 한가운데에 끼었다.
+  panels.forEach((pn, pid) => {
+    const mine = ordered.filter((sg) => sg.panel === pid && !sg.cell);
+    if (!mine.length) return;
+    const b = pn.bbox, main = ordered.filter((sg) => sg.panel === -1 && !sg.cell);
+    if (main.some((sg) => sg.oy > b[1] && sg.oy - median(sg.gs.map((g) => g.size)) < b[3])) return;      // 옆에 본문이 있다 = 사이드바
+    const overlaps = (sg) => sg.gs.some((g) => g.x1 > b[0] && g.x0 < b[2]);
+    const below = main.find((sg) => sg.oy > b[3] && overlaps(sg));
+    if (!below || !main.some((sg) => sg.oy <= b[1] && overlaps(sg))) return;                             // 쪽 맨 위·맨 아래의 상자는 그대로
+    for (const sg of mine) ordered.splice(ordered.indexOf(sg), 1);
+    ordered.splice(ordered.indexOf(below), 0, ...mine);
+  });
+
   // 4-1) 표: 칸마다 줄을 만들고(행→칸→위에서 아래), 표보다 아래에 오는 첫 본문 줄 앞에 끼워 넣는다
   for (const t of tables) {
     const tg = tableInk.filter((g) => g._cell.t === t.id);
@@ -843,7 +1125,12 @@ function buildPageLines(page) {
     }
     cellSegs.sort((a, b) => a.cell.r - b.cell.r || a.cell.c - b.cell.c || a.oy - b.oy);
     const at = ordered.findIndex((sg) => sg.panel === -1 && sg.oy > t.bbox[1] && sg.gs.some((g) => g.x1 > t.bbox[0] && g.x0 < t.bbox[2]));
-    ordered.splice(at < 0 ? ordered.length : at, 0, ...cellSegs);
+    // 좁은 표(쪽 왼쪽 위의 작은 글상자)는 바로 아래 줄이 옆으로 비켜 있으면(가운데 놓인 "<목 차>") 그 줄을 건너뛰어 더 아래에 끼워졌다.
+    // 끼울 자리 바로 앞 줄들이 같은 단에 있고 표보다 아래라면 그 앞으로 올린다.
+    let put = at < 0 ? ordered.length : at;
+    if (at >= 0) while (put > 0 && ordered[put - 1].panel === -1 && !ordered[put - 1].cell && ordered[put - 1].section === ordered[at].section
+      && ordered[put - 1].col === ordered[at].col && ordered[put - 1].oy > t.bbox[3]) put--;
+    ordered.splice(put, 0, ...cellSegs);
   }
 
   // 4-2) 글자 배경색이 깔린 줄 표시(편집기로 옮길 때 배경색으로, 미리보기에서도 회색으로)
@@ -852,6 +1139,9 @@ function buildPageLines(page) {
   const out = ordered.map((sg) => {
     if (!sg.cells) return makeLine(sg, page, spaceGlyphs);
     const parts = sg.cells.map((gs) => makeLine({ ...sg, gs, cells: null }, page, spaceGlyphs));
+    // 칸 글은 아래에서 첫 칸(l)에 이어 붙이기 "전에" 따 둔다. 붙인 뒤에 따면 첫 칸에 줄 전체가 들어가(["가\t12", "12"]),
+    // 칸 목록으로 줄 글을 다시 만들 때(문장부호 복구) 마지막 칸이 두 번 나왔다("가\t12\t12" — 목차의 쪽 번호 중복).
+    const cellTexts = parts.map((q) => q.text);
     const l = parts[0];
     for (const q of parts.slice(1)) {
       l.gaps.push({ gap: q.x0 - l.x1, isSp: true, cell: true, at: l.text.length + 1 });
@@ -860,13 +1150,20 @@ function buildPageLines(page) {
       l.glyphs = [...l.glyphs, ...q.glyphs];
       l.x1 = q.x1;
     }
-    l.cells = parts.map((q) => q.text);
+    l.cells = cellTexts;
     return l;
   });
   for (const l of out) {
     const cx = (l.x0 + l.x1) / 2, cy = l.oy - l.size * 0.35;
     const hb = (page._highlights || []).find((b) => cx > b[0] - 1 && cx < b[2] + 1 && cy > b[1] - 1 && cy < b[3] + 1);
-    if (hb) { l.highlight = true; l.hlRect = hb; }
+    // 배경색이 줄 전체(글자 폭의 90% 이상)를 덮을 때만 "배경색 줄"이다. 문장 속 낱말 몇 개에만 칠한 형광펜은 줄의 성격이 아니다 —
+    // 줄 가운데가 형광펜에 걸렸다는 이유로 배경색 줄이 되면, 그 줄 앞뒤가 "글자 배경색 경계"로 끊겨 문단 한가운데서 줄이 갈렸다.
+    // 덮은 폭은 그 줄 높이에 걸친 배경 도형을 모두 합쳐서 잰다(머리 칸마다 따로 칠한 "구분 | 구체적인 내용" 줄).
+    const band = (page._highlights || []).filter((b) => cy > b[1] - 1 && cy < b[3] + 1 && b[2] > l.x0 && b[0] < l.x1).sort((a, b) => a[0] - b[0]);
+    let covered = 0, upto = l.x0;
+    for (const b of band) { const s0 = Math.max(upto, b[0]), s1 = Math.min(l.x1, b[2]); if (s1 > s0) { covered += s1 - s0; upto = s1; } }
+    if (band.length) l.hlTouch = true;               // 일부라도 배경색이 걸친 줄
+    if (hb && covered >= (l.x1 - l.x0) * 0.9) { l.highlight = true; l.hlRect = hb; }
   }
   // 그림(figure) 옆을 지나는 줄 표시: 오른쪽/왼쪽이 그림에 막혔는가
   for (const l of out) {
@@ -1060,6 +1357,21 @@ function makeLine(seg, page, spaceGlyphs) {
   const expMed = explicitGaps.length >= 2 ? median(explicitGaps) - base : 0;
   const geomSp = expMed ? Math.max(size * 0.15, Math.min(expMed * 0.6, size * 0.3)) : size * 0.15;
   const genSp = expMed ? Math.max(size * 0.08, Math.min(expMed * 0.4, size * 0.2)) : size * 0.08;
+  // 같은 줄에서 이미 띄어쓰기로 확인된 틈(공백 글자가 있거나 PDFium 이 공백을 만들어 준 틈)의 보통 크기.
+  // 좁힌 글꼴(장평·자간을 줄인 글)은 글자 상자가 서로 겹쳐(틈 -0.9pt) 띄어쓰기 틈도 작다(1.5~1.7pt = 글자 크기의 15~17%).
+  // PDFium 이 공백을 만들어 주지 않은 자리는 "글자 크기의 15%" 기준에 살짝 못 미쳐 띄어쓰기가 빠졌다("메시지를말해달라").
+  // 그 줄의 다른 띄어쓰기 틈과 거의 같으면(85% 이상) 띄어쓰기로 본다 — 줄마다 그 줄의 띄어쓰기를 자로 삼는다.
+  const knownSp = [];
+  for (let i = 1; i < gs.length; i++) {
+    const gp = gs[i].x0 - gs[i - 1].x1;
+    if (gp > 0 && spaces.some((s) => s.x0 >= gs[i - 1].x1 - 1 && s.x1 <= gs[i].x0 + 1 && s.x0 < gs[i].x0)) knownSp.push(gp);
+  }
+  // 확인된 띄어쓰기가 둘 미만인 짧은 줄("받음……의 반복입니다.")은 같은 쪽에서 앞서 본 같은 크기 글의 값을 빌린다.
+  const spBySize = (page._spBySize ||= new Map()), sizeKey = Math.round(size * 2);
+  // (가장 작은 값을 남긴다: 양쪽 정렬로 늘어난 줄의 띄어쓰기는 본래보다 넓다)
+  if (knownSp.length >= 2) spBySize.set(sizeKey, Math.min(spBySize.get(sizeKey) ?? Infinity, median(knownSp)));
+  const lineSp = knownSp.length >= 2 ? median(knownSp) : spBySize.get(sizeKey) || 0;
+  const tight = small.length >= 3 ? pct(small, 0.5) : 0;            // 낱말 안 글자 사이의 보통 틈(겹치면 음수)
   for (let i = 0; i < gs.length; i++) {
     const g = gs[i];
     if (i > 0) {
@@ -1078,7 +1390,9 @@ function makeLine(seg, page, spaceGlyphs) {
       const contraction = isLatin(p.c) && /['’]/.test(g.c) && nx && isLatin(nx.c) && nx.x0 - g.x1 < size * 0.15;
       // 옮겨 붙인 장식 첫·끝 글자(BERLIN 의 B·N)는 낱말의 일부 — 실제 공백 글자가 있을 때만 띄운다(상자 위치가 어긋난 글꼴이 많다)
       const isSp = (g._bigJoin || p._bigJoin) ? explicit : contraction ? explicit || gap - base > Math.max(geomSp, size * 0.3)
-        : explicit || gap - base > (latin ? geomSp : size * 0.15) || (generated && gap - base > (latin ? genSp : size * 0.08));
+        : explicit || gap - base > (latin ? geomSp : size * 0.15) || (generated && gap - base > (latin ? genSp : size * 0.08))
+          // (기울임꼴과 바로 선 글자가 만나는 자리는 글자 모양 때문에 틈이 벌어지므로 빼고 본다)
+          || (!latin && !!p.italic === !!g.italic && lineSp > 0 && tight < 0 && gap >= lineSp * 0.85 && gap >= size * 0.1 && gap - tight > size * 0.18);
       gaps.push({ gap, isSp });
       if (isSp) text += " ";
       gaps[gaps.length - 1].at = text.length;      // 이 틈 바로 뒤 글자의 위치(텍스트 기준)
@@ -1142,9 +1456,18 @@ function isFurniture(l, pages, all, bodySize) {
   // 여러 쪽에 같은 위치·같은 내용으로 반복되는 줄
   // 단, 본문까지 같은 쪽(같은 내용을 되풀이한 필사 연습장 등)과 겹치는 것은 머리글의 증거가 아니다
   if (pages.length >= 2) {
-    const same = all.filter((m) => m !== l && m.page !== l.page && Math.abs(m.oy - l.oy) < 8
-      && m.text.replace(/\d+/g, "#").trim() === norm && !duplicatePages(l.page, m.page, all)).length;
-    if (same >= 1) return true;
+    const twins = all.filter((m) => m !== l && m.page !== l.page && Math.abs(m.oy - l.oy) < 8
+      && m.text.replace(/\d+/g, "#").trim() === norm && !duplicatePages(l.page, m.page, all));
+    // 쪽 맨 위의 번호 붙은 제목("장면 4", "제3장" — 본문보다 큰 글자, 쪽 위쪽)은 숫자만 다른 같은 모양이 다른 쪽에도 있다는 이유로
+    // 머리글로 빠져 제목이 통째로 사라졌다. 머리글은 ① 이어지는 쪽에 똑같은 글로 되풀이되거나 ② 숫자가 쪽을 따라 하나씩 올라간다
+    // (쪽 번호가 든 시험지 머리글 "… 문제지 1", "… 문제지 2"). 글자가 본문보다 크고 둘 다 아니면(가까운 8쪽 안에 똑같은 줄이 없고 쪽 번호도 아니면) 그 쪽의 제목이다 — 같은 제목이
+    // 멀리 떨어진 다른 장에 또 나오거나("장면 4"가 시나리오마다), 숫자가 쪽 차이와 맞지 않으면 쪽 번호가 아니다.
+    const num = (t) => { const d = t.match(/\d+/g); return d ? +d[d.length - 1] : null; };
+    const counter = twins.length > 0 && twins.every((m) => num(m.text) !== null && num(l.text) !== null && num(m.text) - num(l.text) === m.page - l.page);
+    // 그리고 그 쪽의 위쪽 여백 자리에 이 줄 하나뿐이어야 한다 — 시험지 머리글("제1교시", "홀수형", "단답형")은 여러 줄이 함께 놓인다.
+    const alone = !all.some((m) => m !== l && m.page === l.page && m.oy < m.pageH * 0.12);
+    const title = inTop && alone && l.size >= bodySize * 1.1 && !counter && !twins.some((m) => Math.abs(m.page - l.page) <= 8 && m.text.trim() === l.text.trim());
+    if (twins.length >= 1 && !title) return true;
   }
   // 한 쪽짜리라도 위쪽 여백의 작은 글씨는 머리글로 본다(아래쪽은 각주일 수 있어 제외)
   return inTop && l.size < bodySize * 0.8;
@@ -1226,11 +1549,16 @@ function buildDictionary(lines) {
 
 // ───────── 이음새 분석 ─────────
 function firstToken(l) { return l.text.split(" ")[0]; }
+// 글자·숫자·따옴표·괄호가 아닌 기호 한 글자
+const SYMBOL_LEAD = /^[^\p{L}\p{N}\s"'“”‘’()\[\]<>《》〈〉「」『』.,!?…\-]$/u;
+// 짧은 이름표(18자 이하, 문장부호 없음) + 쌍점 + 값. 시각(12:30)·비율(1:1)처럼 쌍점 앞뒤가 숫자인 것은 이름표가 아니다.
+const LABEL_LINE = /^(?![^:：]*\d\s*[:：]\s*\d)[^\s:：.!?。][^:：.!?。]{0,18}\s*[:：]\s+\S/;
 function lastToken(l) { return l.text.split(" ").at(-1); }
 function glyphWidth(g) { return Math.max(0, g.x1 - g.x0); }
 
 // 단 가운데에 맞춰 놓인 줄(인용문, 제목)
 const centered = (l) => l.spanTitle || (l.axis != null && Math.abs((l.x0 + l.x1) / 2 - l.axis) < l.size * 0.6)
+  // (가운데 판정은 단 전체 기준으로: 좁은 글 덩이의 오른쪽 끝을 쓰면 덩이 안의 보통 줄이 "가운데 줄"로 보인다)
   || (l.x0 - l.L > l.size && l.R - l.x1 > l.size && Math.abs((l.x0 + l.x1) / 2 - (l.L + l.R) / 2) < l.size * 0.6);
 // 본문보다 큰(작은) 글자가 이어지면 줄 간격도 그 비율만큼 넓다(좁다)
 function expectPitch(prev, cur, bodySize) {
@@ -1259,7 +1587,8 @@ function analyzePair(prev, cur, next, bodySize, spaceW, prevprev) {
   const cellKey = (l) => (l.cell ? `${l.cell.table}:${l.cell.row}:${l.cell.col}` : "");
   if (cellKey(prev) !== cellKey(cur)) structuralBreak = cur.cell || prev.cell ? "표 칸 경계" : null;
   if (structuralBreak) {}
-  else if (!!prev.highlight !== !!cur.highlight && prev.page === cur.page) structuralBreak = "글자 배경색 경계";
+  // 한쪽은 배경색 줄이고 다른 쪽은 배경색이 전혀 없을 때만 경계다. 다른 쪽에도 배경색이 일부 걸쳐 있으면 여러 줄에 걸친 형광펜이다.
+  else if (!!prev.highlight !== !!cur.highlight && prev.page === cur.page && !(prev.highlight ? cur.hlTouch : prev.hlTouch)) structuralBreak = "글자 배경색 경계";
   else if (prev.cells) structuralBreak = "표/목차의 행 끝(오른쪽 칸이 있음)";
   else if (TOC_LINE.test(prev.text)) structuralBreak = "목차 항목 끝(점선 + 쪽 번호)";
   else if (prev.panel !== cur.panel && prev.page === cur.page) structuralBreak = "상자(사이드바) 경계";
@@ -1294,13 +1623,23 @@ function analyzePair(prev, cur, next, bodySize, spaceW, prevprev) {
       if (sameGroup && cur.x0 - ref > cur.size * 0.6) structuralBreak = "첫 줄 들여쓰기(그림 옆)";
     } else if (ind > cur.size * 0.6 && !alignedWithPrev && !cur.tableGroup && !(centered(prev) && centered(cur))
       && !(nextInd > cur.size * 0.6 && Math.abs(nextInd - ind) < cur.size * 0.3)) structuralBreak = "첫 줄 들여쓰기";
+    // "이름표 : 값" 목록(플레이 인원 : …, 추천 기능 : …): 앞줄과 이 줄이 모두 짧은 이름표 + 쌍점으로 시작하면 줄마다 한 항목이다.
+    // 목록에서 가장 긴 줄은 그 묶음의 오른쪽 끝을 스스로 정해 "꽉 찬 줄"로 보이므로, 여유폭으로는 가를 수 없어 다음 줄과 붙었다.
+    else if (LABEL_LINE.test(prev.text) && LABEL_LINE.test(cur.text)) structuralBreak = "이름표 : 값 목록";
+    // 앞줄과 이 줄이 같은 기호 한 글자 + 띄어쓰기로 시작하면(⋅ …, ❧ …) 글머리표 목록의 이웃 항목이다 — 글머리표 목록에 없는 기호라도.
+    else if (sameGroup && SYMBOL_LEAD.test(firstToken(cur)) && firstToken(prev) === firstToken(cur) && cur.text.includes(" ")) structuralBreak = "같은 기호로 시작하는 줄";
     else if ((cur.symbolBullet || BULLET.test(firstToken(cur)) || BULLET_CHARS.test(cur.glyphs[0].c)) && cur.text.includes(" ")
       && (END_PUNCT.test(prev.text) || prev.text.endsWith(":") || prev.R - prev.natEnd > cur.size * 2
         || sameListNext(firstToken(prev), firstToken(cur)))) structuralBreak = "글머리 기호/번호";
   }
 
   // 여유폭: 앞 줄이 (양쪽정렬을 되돌렸을 때) 오른쪽 끝까지 얼마나 비어 있었나
-  const slack = prev.R - prev.natEnd;
+  // 좁은 글 덩이의 오른쪽 끝(groupR 이 있으면 R 은 덩이 기준)은 문장이 끝나지 않은 줄을 살리는 데만 쓴다. 문장 끝 부호로 끝난 줄은
+  // 단 전체 기준 그대로 — 덩이 기준으로 보면 "꽉 찬 줄"이 되어, 끝난 문장 뒤의 새 항목(다음 문제 머리말, "학생1 :" 대사)까지 이어 붙였다.
+  const sentenceDone = /[.!?。？！…]["'”’)\]」』》〉]*\s*$/.test(prev.text);
+  // 쌍점으로 끝난 줄("…다섯 단계로 이루어집니다:")도 뒤에 목록이 오는 끝난 줄이다.
+  const lineDone = sentenceDone || /[:：]\s*$/.test(prev.text);
+  const slack = (prev.localR !== undefined && !lineDone ? prev.localR : prev.R) - prev.natEnd;
   // 줄 머리 금칙: 마침표·쉼표 등은 앞 글자와 함께 넘어가므로 한 단위로 본다
   let k = 1;
   while (k < cur.glyphs.length && CLOSE_PUNCT.test(cur.glyphs[k].c) && cur.glyphs[k].x0 - cur.glyphs[k - 1].x1 < cur.size * 0.1) k++;

@@ -214,6 +214,40 @@ function renderImage(doc, page, img) {
 }
 
 
+/** 그림 개체 하나만 그려 잉크가 있는 점을 알려 준다(옆의 글자는 섞이지 않는다). 높이가 targetH 픽셀쯤 되게 키워 그린다.
+ *  반환: { w, h, ink: Uint8Array(w*h) } 또는 null. 잉크 = 불투명하고 바탕(가장 흔한 밝기)보다 뚜렷이 어두운 점.
+ *  글 줄에 끼워 넣은 작은 그림이 어떤 문장 부호 모양인지 볼 때 쓴다(extract-pdfium.js punctuationImages). */
+export function imageInk(doc, page, img, targetH = 96) {
+  const M = page.module, obj = img._obj;
+  const buf = M.wasmExports.malloc(32);
+  let bmp = 0;
+  try {
+    const [a, b, c, d, e, f] = readMatrix(M, obj, buf);
+    const k = Math.max(1, Math.min(16, targetH / Math.max(1, Math.hypot(c, d))));
+    M._FPDFImageObj_SetMatrix(obj, a * k, b * k, c * k, d * k, e, f);
+    try { bmp = M._FPDFImageObj_GetRenderedBitmap(doc.documentIdx, page.pageIdx, obj); }
+    finally { M._FPDFImageObj_SetMatrix(obj, a, b, c, d, e, f); }
+    if (!bmp) return null;
+    const w = M._FPDFBitmap_GetWidth(bmp), h = M._FPDFBitmap_GetHeight(bmp), stride = M._FPDFBitmap_GetStride(bmp);
+    const fmt = M._FPDFBitmap_GetFormat(bmp), bppx = fmt === 1 ? 1 : fmt === 2 ? 3 : 4;
+    const base = M._FPDFBitmap_GetBuffer(bmp);
+    const lum = new Float32Array(w * h), alpha = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const s = base + y * stride + x * bppx, t = y * w + x;
+      lum[t] = bppx === 1 ? M.HEAPU8[s] : M.HEAPU8[s + 2] * 0.3 + M.HEAPU8[s + 1] * 0.59 + M.HEAPU8[s] * 0.11;
+      alpha[t] = fmt === 4 ? M.HEAPU8[s + 3] : 255;
+    }
+    const solid = []; for (let t = 0; t < w * h; t++) if (alpha[t] > 128) solid.push(lum[t]);
+    const ink = new Uint8Array(w * h);
+    if (solid.length < w * h * 0.5) { for (let t = 0; t < w * h; t++) ink[t] = alpha[t] > 128 ? 1 : 0; }     // 투명 바탕 위의 획
+    else { solid.sort((p, q) => p - q); const bg = solid[Math.floor(solid.length * 0.8)]; for (let t = 0; t < w * h; t++) ink[t] = alpha[t] > 128 && lum[t] < bg - 90 ? 1 : 0; }
+    return { w, h, ink };
+  } catch { return null; } finally {
+    if (bmp) M._FPDFBitmap_Destroy(bmp);
+    M.wasmExports.free(buf);
+  }
+}
+
 /** 쪽의 한 부분(region, pt)을 가로 W × 세로 H 픽셀 그림으로 그린다(가로세로 배율이 달라도 된다).
  *  반환: { data: Uint8Array(RGB, 한 점에 3바이트), w, h } — 표 인식 모델(core/ppstructure.js) 입력용 */
 export function renderRegionRGB(page, region, W, H) {

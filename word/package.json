@@ -1,7 +1,7 @@
 {
   "name": "ogolgye-word",
   "productName": "오골계 워드",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "HWP 편집기 + PDF 줄바꿈 복원 보기 (로컬 전용)",
   "author": "오골계 (@5golgyeo, https://x.com/5golgyeo)",
   "license": "SEE LICENSE IN LICENSE",
@@ -14,7 +14,10 @@
     "get-model": "node scripts/get-kiwi-model.js",
     "check-exports": "node scripts/check-export-files.js",
     "check-pdf-pipeline": "node scripts/check-pdf-pipeline.js",
+    "check-boxes": "node scripts/check-boxes.js",
+    "check-pdf-scheduler": "node scripts/check-pdf-scheduler.js",
     "check-api-tools": "node scripts/check-api-tools.js",
+    "check-security": "node scripts/check-security.js",
     "check-pdf-export": "electron scripts/check-pdf-export.js",
     "dist": "electron-builder --publish never",
     "release": "electron-builder --publish always",
@@ -34,17 +37,28 @@
     "tesseract.js": "^6.0.1"
   },
   "devDependencies": {
-    "electron": "^38.0.0",
-    "electron-builder": "^26.15.3"
+    "electron": "44.6.0",
+    "electron-builder": "26.15.3"
   },
   "build": {
     "appId": "com.ogolgye.word",
     "productName": "오골계 워드",
+    "electronVersion": "44.6.0",
     "directories": {
       "output": "dist",
       "buildResources": "build"
     },
-    "asar": false,
+    "asar": true,
+    "asarUnpack": [
+      "models/**",
+      "node_modules/kiwi-nlp/**",
+      "node_modules/onnxruntime-node/**",
+      "node_modules/@hyzyla/pdfium/**"
+    ],
+    "electronLanguages": [
+      "ko",
+      "en-US"
+    ],
     "files": [
       "main.js",
       "preload.cjs",
@@ -60,8 +74,36 @@
       "!**/*.log",
       "!node_modules/onnxruntime-node/bin/napi-v6/!(${platform})/**",
       "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/**/DirectML.dll",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/**/dxcompiler.dll",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/**/dxil.dll",
+      "!node_modules/onnxruntime-node/dist/*.map",
+      "!node_modules/onnxruntime-node/lib/**",
+      "!node_modules/onnxruntime-node/script/**",
+      "!node_modules/@phosphor-icons/web/src/**",
+      "node_modules/@phosphor-icons/web/src/regular/style.css",
+      "node_modules/@phosphor-icons/web/src/regular/Phosphor.woff2",
+      "!node_modules/tesseract.js-core/*.wasm.js",
+      "!node_modules/tesseract.js-core/tesseract-core.js",
+      "!node_modules/tesseract.js-core/tesseract-core.wasm",
+      "!node_modules/tesseract.js-core/tesseract-core-simd.js",
+      "!node_modules/tesseract.js-core/tesseract-core-simd.wasm",
+      "!node_modules/@hyzyla/pdfium/dist/*.d.ts",
+      "!node_modules/@hyzyla/pdfium/dist/index.cjs",
+      "!node_modules/@hyzyla/pdfium/dist/index.esm.base64.js",
+      "!node_modules/@hyzyla/pdfium/dist/index.esm.browser.js",
+      "!node_modules/@hyzyla/pdfium/dist/index.esm.cdn.js",
+      "!node_modules/@hyzyla/pdfium/dist/index.esm.worker.js",
+      "!node_modules/@hyzyla/pdfium/dist/worker.bundle.js",
       "!vendor/rhwp-studio/*.d.ts",
-      "!vendor/rhwp-studio/manifest.webmanifest"
+      "!vendor/rhwp-studio/manifest.webmanifest",
+      "!vendor/rhwp-studio/fonts/D2Coding-Bold.woff2",
+      "!vendor/rhwp-studio/fonts/GowunBatang-Bold.woff2",
+      "!vendor/rhwp-studio/fonts/NanumGothic-Bold.woff2",
+      "!vendor/rhwp-studio/fonts/NanumGothic-ExtraBold.woff2",
+      "!vendor/rhwp-studio/fonts/NanumGothicCoding-Bold.woff2",
+      "!vendor/rhwp-studio/fonts/NanumMyeongjo-Bold.woff2",
+      "!vendor/rhwp-studio/fonts/NanumMyeongjo-ExtraBold.woff2"
     ],
     "win": {
       "target": [

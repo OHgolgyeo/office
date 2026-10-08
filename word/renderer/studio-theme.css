@@ -117,9 +117,10 @@
 
 /* 사용자가 등록한 API 도구 */
 .og-ai-tools { display:flex; align-self:stretch; align-items:center; flex:0 0 auto; }
-.og-ai-tool-btn { min-width:48px !important; height:100%; flex-direction:column; gap:0 !important; padding:2px 5px !important; border-top:2px solid var(--ai-color) !important; }
+/* 아이콘만 보인다(이름은 마우스를 올리면 뜨는 설명으로). 이름을 아이콘 아래에 두면 버튼이 생기는 순간 도구 줄이 두꺼워졌다. */
+.og-ai-tool-btn { min-width:0 !important; gap:0 !important; box-shadow:inset 0 -2px 0 var(--ai-color); }
 .og-ai-tool-icon { color:var(--ai-color); font-size:15px; font-weight:700; line-height:17px; max-width:40px; overflow:hidden; }
-.og-ai-tool-label { color:#555; font-size:10px; max-width:64px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.og-ai-tool-label { display:none; }
 .og-ai-panel { position:fixed; z-index:1250; display:flex; flex-direction:column; box-sizing:border-box; width:min(430px,calc(100vw - 20px)); max-height:calc(100vh - 108px); color:#333; background:#fff; border:1px solid #d5d5d5; border-radius:9px; box-shadow:0 10px 30px rgba(0,0,0,.2); overflow:hidden; font:13px/1.45 "맑은 고딕",sans-serif; }
 .og-ai-panel[hidden] { display:none; }
 .og-ai-panel.float { top:112px; right:18px; }
@@ -210,3 +211,20 @@
 .og-about-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-bottom: 4px; color: #666; }
 .og-about-text { margin: 0; padding: 10px 12px; max-height: none; border-radius: 7px; background: #f7f8f5; font: 12px/1.55 Consolas, "D2Coding", monospace; white-space: pre-wrap; overflow-wrap: anywhere; color: #333; }
 .og-about-frame { width: 100%; height: 60vh; border: 1px solid #e6e7e3; border-radius: 7px; background: #fff; }
+
+/* 칸 바탕색 단추와 색 고르기 */
+.og-cell-fill-icon { display:block; width:15px; height:13px; box-sizing:border-box; border:1px solid #666; border-bottom:4px solid #f5c400; background:linear-gradient(#666,#666) 50% 0/1px 100% no-repeat, linear-gradient(#666,#666) 0 50%/100% 1px no-repeat; }
+.og-cell-fill-pop { position:fixed; z-index:1300; padding:8px; background:#fff; border:1px solid #cfcfcf; border-radius:6px; box-shadow:0 4px 14px rgba(0,0,0,.18); font:12px "맑은 고딕",sans-serif; color:#333; }
+.og-cell-fill-pop[hidden] { display:none; }
+.og-cell-fill-grid { display:grid; grid-template-columns:repeat(7,20px); gap:4px; }
+.og-cell-fill-grid button { width:20px; height:20px; padding:0; border:1px solid #bbb; border-radius:3px; cursor:pointer; }
+.og-cell-fill-grid button:hover { outline:2px solid #4a8f3c; outline-offset:1px; }
+.og-cell-fill-row { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; }
+.og-cell-fill-row button { border:1px solid #ccc; border-radius:4px; background:#fff; padding:3px 8px; cursor:pointer; }
+.og-cell-fill-row input { width:28px; height:20px; padding:0; border:0; vertical-align:middle; cursor:pointer; }
+.og-cell-fill-note { margin-top:6px; color:#b3261e; }
+:root[data-theme-effective="dark"] .og-cell-fill-pop { color:var(--ui-text); background:var(--ui-surface); border-color:var(--ui-border); }
+
+/* 글 위에서는 글자 입력용 커서(I 모양). 편집 화면은 기본 화살표만 쓰고, 표 테두리·그림 위에서만 따로 바꾼다(그 경우는
+   편집 화면이 이 요소에 직접 넣는 값이 우선한다). 스크롤 막대는 브라우저가 화살표로 보여 준다. */
+#scroll-container { cursor: text; }

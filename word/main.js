@@ -2,9 +2,10 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, safeStorage } from "electron";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { startServer, warmUp, shutdown } from "./server.js";
-import { htmlArchive, pdfPrintParts } from "./core/export-files.js";
+import { htmlArchive, pdfPrintParts, pdfPrintStreamShell, pdfPrintStreamPage } from "./core/export-files.js";
 import { officeExport } from "./core/export-office.js";
 import { GoogleDocs } from "./core/google-docs.js";
 import { AiTools } from "./core/ai-tools.js";
@@ -15,6 +16,28 @@ import updater from "electron-updater";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_ICON = path.join(__dirname, "assets", "icons", "word-folder-blue-to-sky.png");
 let win;
+let appOrigin = "";
+const writablePaths = new Set();
+const pdfStreams = new Map();
+
+function trustedIpc(event) {
+  const frame = event?.senderFrame;
+  if (!win || win.isDestroyed() || event.sender !== win.webContents || frame !== win.webContents.mainFrame || !String(frame.url || "").startsWith(appOrigin + "/app/")) {
+    throw new Error("허용되지 않은 화면의 요청입니다.");
+  }
+}
+function handle(channel, fn) {
+  ipcMain.handle(channel, async (event, arg) => { trustedIpc(event); return fn(event, arg); });
+}
+function bytesOf(value, max = 512 * 1024 * 1024) {
+  const bytes = Buffer.from(value || []);
+  if (bytes.length > max) throw new Error("처리할 파일이 너무 큽니다.");
+  return bytes;
+}
+function writableKey(filePath) {
+  const full = path.resolve(String(filePath || ""));
+  return process.platform === "win32" ? full.toLowerCase() : full;
+}
 
 async function pdfFromSvgs(svgs) {
   // 쪽 크기 스타일만 담은 작은 틀을 연 뒤 쪽 조각(SVG)을 하나씩 붙인다. 한 덩어리 HTML 을 data 주소로 열면
@@ -29,8 +52,48 @@ async function pdfFromSvgs(svgs) {
   } finally { if (!pdfWindow.isDestroyed()) pdfWindow.destroy(); }
 }
 
+function closePdfStream(id) {
+  const state = pdfStreams.get(id); if (!state) return;
+  pdfStreams.delete(id);
+  if (!state.window.isDestroyed()) state.window.destroy();
+}
+async function beginPdfStream(name, filters) {
+  // 저장 대화상자나 인쇄 창이 겹쳐 남지 않도록 앱에서는 한 번에 한 PDF만 만든다.
+  for (const id of [...pdfStreams.keys()]) closePdfStream(id);
+  const chosen = await dialog.showSaveDialog(win, { defaultPath: name, filters });
+  if (chosen.canceled || !chosen.filePath) return null;
+  const id = crypto.randomUUID(), pdfWindow = new BrowserWindow({ show: false, webPreferences: { sandbox: true, contextIsolation: true } });
+  try { await pdfWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(pdfPrintStreamShell())); }
+  catch (e) { pdfWindow.destroy(); throw e; }
+  pdfStreams.set(id, { window: pdfWindow, filePath: chosen.filePath, names: new Map(), pages: 0 });
+  pdfWindow.once("closed", () => pdfStreams.delete(id));
+  return { id };
+}
+async function appendPdfStream(id, svg) {
+  const state = pdfStreams.get(id); if (!state) throw new Error("끝났거나 취소된 PDF 내보내기입니다.");
+  const text = String(svg || "").trimStart(); if (!/^<svg\b/i.test(text) || text.length > 64 * 1024 * 1024) throw new Error("PDF 쪽 자료가 올바르지 않거나 너무 큽니다.");
+  const part = pdfPrintStreamPage(text, state.names);
+  if (part.rule) await state.window.webContents.executeJavaScript(`document.getElementById("page-rules").textContent += ${JSON.stringify(part.rule)}; 0`, true);
+  await state.window.webContents.executeJavaScript(`document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(part.page)}); 0`, true);
+  state.pages++;
+  return { pages: state.pages };
+}
+async function finishPdfStream(id) {
+  const state = pdfStreams.get(id); if (!state) throw new Error("끝났거나 취소된 PDF 내보내기입니다.");
+  try {
+    if (!state.pages) throw new Error("내보낼 쪽이 없습니다.");
+    await state.window.webContents.executeJavaScript("document.fonts ? document.fonts.ready.then(()=>true) : true", true);
+    const pdf = await state.window.webContents.printToPDF({ printBackground: true, preferCSSPageSize: true, margins: { marginType: "none" } });
+    await fs.promises.writeFile(state.filePath, pdf);
+    writablePaths.add(writableKey(state.filePath));
+    return { path: state.filePath, name: path.basename(state.filePath), pages: state.pages };
+  } finally { closePdfStream(id); }
+}
+
 async function createWindow() {
-  const { port } = await startServer(0);           // 빈 포트를 골라 127.0.0.1 에만 연다
+  const authToken = crypto.randomBytes(32).toString("hex");
+  const { port } = await startServer(0, { authToken }); // 빈 포트를 골라 127.0.0.1 에만 연다
+  appOrigin = `http://127.0.0.1:${port}`;
   warmUp();                                        // PDF 준비 작업 스레드를 띄워 둔다(Kiwi 는 PDF 를 처음 준비할 때)
   win = new BrowserWindow({
     width: 1500, height: 950, title: "오골계 워드",
@@ -40,7 +103,7 @@ async function createWindow() {
     titleBarStyle: "hidden",
     titleBarOverlay: { color: "#f3f3f3", symbolColor: "#1f1f1f", height: 28 },
     trafficLightPosition: { x: 12, y: 7 },           // 맥: 창 버튼(빨강·노랑·초록)을 제목 표시줄 가운데 높이에
-    webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: false },
+    webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: true },
   });
   // 메뉴는 앱 화면의 도구 막대로. 맥은 화면 맨 위 메뉴가 없으면 복사·붙여넣기·종료 단축키가 동작하지 않아 기본 메뉴만 둔다.
   Menu.setApplicationMenu(process.platform === "darwin" ? Menu.buildFromTemplate([{ role: "appMenu" }, { role: "editMenu" }, { role: "windowMenu" }]) : null);
@@ -49,29 +112,44 @@ async function createWindow() {
     if (/^https:\/\//i.test(url)) shell.openExternal(url);
     return { action: "deny" };
   });
-  win.loadURL(`http://127.0.0.1:${port}/app/`);
+  await win.webContents.session.cookies.set({
+    url: appOrigin, name: "ogolgye_session", value: authToken,
+    httpOnly: true, secure: false, sameSite: "strict",
+  });
+  await win.loadURL(`${appOrigin}/app/`);
+  // 배포본 회귀 검사 전용: 실제 사용자 실행에는 없는 환경 변수이며, 화면과 iframe이 뜰 시간을 준 뒤 스스로 끝낸다.
+  const smokeMs = Number(process.env.OG_SMOKE_EXIT_MS || 0);
+  if (smokeMs > 0) setTimeout(() => app.quit(), Math.max(1000, smokeMs)).unref?.();
 }
 
 // 저장·열기 대화상자(화면에서 요청)
-ipcMain.handle("file:save", async (_e, { bytes, name, filters }) => {
+handle("file:save", async (_e, { bytes, name, filters }) => {
   const r = await dialog.showSaveDialog(win, { defaultPath: name, filters });
   if (r.canceled || !r.filePath) return null;
-  await fs.promises.writeFile(r.filePath, Buffer.from(bytes));
+  await fs.promises.writeFile(r.filePath, bytesOf(bytes));
+  writablePaths.add(writableKey(r.filePath));
   return { path: r.filePath, name: path.basename(r.filePath) };
 });
-ipcMain.handle("file:saveTo", async (_e, { bytes, filePath }) => {
-  await fs.promises.writeFile(filePath, Buffer.from(bytes));
-  return { path: filePath, name: path.basename(filePath) };
+handle("file:saveTo", async (_e, { bytes, filePath }) => {
+  const full = path.resolve(String(filePath || ""));
+  if (!writablePaths.has(writableKey(full))) throw new Error("저장 대화상자에서 확인하지 않은 경로입니다.");
+  await fs.promises.writeFile(full, bytesOf(bytes));
+  return { path: full, name: path.basename(full) };
 });
-ipcMain.handle("file:open", async (_e, { filters }) => {
+handle("file:open", async (_e, { filters }) => {
   const r = await dialog.showOpenDialog(win, { properties: ["openFile"], filters });
   if (r.canceled || !r.filePaths[0]) return null;
   const p = r.filePaths[0];
+  writablePaths.add(writableKey(p));
   return { path: p, name: path.basename(p), bytes: new Uint8Array(await fs.promises.readFile(p)) };
 });
-ipcMain.handle("export:html-zip", async (_e, { html }) => new Uint8Array(htmlArchive(html)));
-ipcMain.handle("export:pdf", async (_e, { svgs }) => new Uint8Array(await pdfFromSvgs(svgs)));
-ipcMain.handle("export:office", async (_e, { format, model }) => new Uint8Array(officeExport(format, model)));
+handle("export:html-zip", async (_e, { html, images }) => new Uint8Array(htmlArchive(html, images || [])));
+handle("export:pdf", async (_e, { svgs }) => new Uint8Array(await pdfFromSvgs(svgs)));
+handle("export:pdf-stream-start", async (_e, { name, filters }) => beginPdfStream(name, filters));
+handle("export:pdf-stream-page", async (_e, { id, svg }) => appendPdfStream(id, svg));
+handle("export:pdf-stream-finish", async (_e, { id }) => finishPdfStream(id));
+handle("export:pdf-stream-cancel", async (_e, { id }) => { closePdfStream(id); return { canceled: true }; });
+handle("export:office", async (_e, { format, model, images }) => new Uint8Array(officeExport(format, model, images || [])));
 
 // Google 연결 정보·AI 키는 운영체제 보안 저장소(safeStorage)로만 암호화해 둔다. 쓸 수 없으면 평문으로 대신 저장하지 않는다.
 function secureCrypt(what) {
@@ -79,7 +157,7 @@ function secureCrypt(what) {
   return { encrypt: (t) => safeStorage.encryptString(t), decrypt: (b) => safeStorage.decryptString(Buffer.from(b)) };
 }
 // 화면 요청 처리: 결과는 { ok: true, ... } 또는 { ok: false, error }
-const ipcCall = (fn) => async (_e, arg) => { try { return { ok: true, ...(await fn(arg || {})) }; } catch (err) { return { ok: false, error: String(err?.message || err) }; } };
+const ipcCall = (fn) => async (event, arg) => { try { trustedIpc(event); return { ok: true, ...(await fn(arg || {})) }; } catch (err) { return { ok: false, error: String(err?.message || err) }; } };
 
 // Google 연결: 사용자가 각자 등록한 클라이언트를 쓴다
 let google = null;
@@ -108,7 +186,7 @@ ipcMain.handle("ai:save", ipcCall(async (tool) => ({ tools: aiTools().save(tool)
 ipcMain.handle("ai:remove", ipcCall(async ({ id }) => ({ tools: aiTools().remove(id) })));
 ipcMain.handle("ai:run", ipcCall(async ({ id, input, options }) => aiTools().run(id, input, options)));
 // 중간 구조 → 한글 문서(HWPX)
-ipcMain.handle("convert:hwpx", async (_e, { model, pageless }) => new Uint8Array(await hwpxFromModel(model, { pageless: pageless ?? null })));
+handle("convert:hwpx", async (_e, { model, pageless }) => new Uint8Array(await hwpxFromModel(model, { pageless: pageless ?? null })));
 
 app.setAppUserModelId("com.ogolgye.word");
 // ── 자동 업데이트: GitHub 릴리스(OHgolgyeo/office)에 새 버전이 올라오면 받아 두고 설치한다.
@@ -164,5 +242,6 @@ let shuttingDown = false;
 app.on("before-quit", (e) => {
   if (shuttingDown) return;
   shuttingDown = true; e.preventDefault();
+  for (const id of [...pdfStreams.keys()]) closePdfStream(id);
   Promise.race([shutdown(), new Promise((r) => setTimeout(r, 1500))]).finally(() => app.quit());
 });

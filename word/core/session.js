@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { extractGlyphs, getLibrary, closePage, withPage } from "./src/extract-pdfium.js";
 import { renderPageJpeg, readPageObjects, exportImage, regionAverageColor, regionBackgroundColor, withHiddenText, withOnlyImages } from "./src/extract-objects.js";
-import { reconstruct, TOC_LINE } from "./src/reconstruct.js";
+import { reconstruct, repairPunctuationText, TOC_LINE } from "./src/reconstruct.js";
 import { renderTextLayers, renderGraphicText } from "./src/render-layout.js";
 import { ocrRegion, ocrAvailable } from "./ocr.js";
 import { detectLayout, tablesOf, FURNITURE_LABELS, scanTableHtml, pdfTableHtml, ppModelsInstalled } from "./ppstructure.js";
@@ -21,6 +21,7 @@ export function boldFontName(name) {
   return /bold|black|heavy|semibold|extrabold|굵/i.test(n) || /[a-z](?:B|EB|XB|SB|Bd|Bk)$/.test(n) || /[-_ ](?:B|EB|XB|SB)$/i.test(n);
 }
 
+const LABEL_VALUE = /^[^\s:：.!?。][^:：.!?。]{0,18}\s*[:：]\s*\S/;
 export function pdfHeadingLevel(para, bodySize, style = {}) {
   const text = String(para?.text || "").trim();
   const lay = para?.layout || {};
@@ -32,6 +33,9 @@ export function pdfHeadingLevel(para, bodySize, style = {}) {
   if (!text || chars > 120 || lineCount > 3 || para?.cell) return 0;
   const sentenceLike = chars > 55 && /[.!?。！？]$/.test(text);
   if (sentenceLike && ratio < 1.4) return 0;
+  // "이름표 : 값" 줄(전투 확률 : 없음)은 이름표가 굵어도 제목이 아니다 — 값이 한두 글자면 줄 대부분이 굵은 글자라
+  // 제목으로 잡혀, 목록 한가운데 줄의 앞뒤에만 빈 줄이 들어갔다. 글자가 본문보다 뚜렷이 클 때만 제목으로 본다.
+  if (LABEL_VALUE.test(text) && ratio < 1.17) return 0;
   // 굵기: 글꼴이 알려 주는 굵기, 또는 글꼴 이름(굵기를 적어 두지 않은 PDF 가 많다)
   const bold = (Number(lay.weight) || 400) >= 600 || boldFontName(lay.font);
   const centered = lay.align === "center";
@@ -91,6 +95,9 @@ export class PdfSession {
     this.ocrGeneration = 0;      // 언어 변경 전에 시작한 인식 결과가 뒤늦게 섞이지 않게 구분
     this.ocrLangDir = null;      // 서버가 정해 준다(models/ocr)
     this.ocrLanguages = ["kor", "eng"];
+    this._layoutPrefetchEpoch = 0;
+    this._layoutPrefetchTimer = null;
+    this._priorityLayout = 0;
   }
 
   /** 여는 즉시 할 일: 글자와 이미지 위치(실제 그림 데이터는 문서화에서 요청할 때만) */
@@ -242,8 +249,13 @@ export class PdfSession {
       await this.layoutPages(pages);                               // 두 쪽씩 동시에, 진행 표시와 함께(이미 읽은 쪽은 건너뜀)
       for (const n of pages) aiFurniture.push(...await this.pageFurniture(n).catch(() => []));
     }
+    // 단, 본문보다 큰 글자(1.15배 이상)는 머리말 영역에 들었어도 그대로 둔다: 레이아웃 모델은 쪽 맨 위의 장 제목("개요" 등)도
+    // 머리말로 분류하곤 해서 제목이 통째로 사라졌다. 쪽마다 되풀이되는 머리말은 본문보다 작거나 같은 크기이고,
+    // 큰 글자 머리말은 되풀이 검사(isFurniture)가 이미 걸러 낸다.
+    const bodySize = this.res.stats?.bodySize || 10;
+    const titleSized = (p) => !p.ocr && (Number(this.res.paragraphs[p.paragraphIndex]?.layout?.fontSize) || 0) >= bodySize * 1.15;
     const parts = (await this.contentPartsWithOcr(pageIndexes, { scanTables }))?.filter((p) => {
-      const cut = aiFurniture.length ? this.linesOutsideTables(p, [], aiFurniture) : null;
+      const cut = aiFurniture.length && !titleSized(p) ? this.linesOutsideTables(p, [], aiFurniture) : null;
       if (cut) p.text = cut.text;
       return !cut || cut.text;
     });
@@ -371,33 +383,62 @@ export class PdfSession {
 
   /** 여러 쪽의 AI 레이아웃을 한꺼번에(동시에 concurrency 쪽씩). 문서화(앞)와 미리 읽기(뒤)가 같은 기억을 쓴다.
    *  front: 문서화 진행 표시(state.progress)를 갱신한다. 뒤에서 미리 읽을 때는 state.aiPrefetch 만. */
-  async layoutPages(pages, { concurrency = 2, front = true } = {}) {
+  async layoutPages(pages, { concurrency = 2, front = true, urgent = false, prefetchEpoch = null } = {}) {
     if (!this.ppDir || !ppModelsInstalled(this.ppDir)) return;
     this.layoutCache ||= new Map();
     const total = pages.length;
     const isDone = (n) => this.layoutCache.has(n) || this.layoutDisk()?.[n];
     let done = pages.filter(isDone).length, k = 0;
     const todo = pages.filter((n) => !isDone(n));
-    const show = () => { if (front) this.state.progress = { phase: "레이아웃 분석", done, total }; else this.state.aiPrefetch = { done, total }; };
+    const valid = () => !this.closed && (prefetchEpoch === null || prefetchEpoch === this._layoutPrefetchEpoch);
+    const show = () => { if (front) this.state.progress = { phase: "레이아웃 분석", done, total }; else if (!urgent) this.state.aiPrefetch = { done, total }; };
     show();
-    if (front) this._fg = (this._fg || 0) + 1;                    // 문서화가 도는 동안 뒤의 미리 읽기는 비켜선다
+    const priority = front || urgent;
+    if (priority) this._priorityLayout++;                         // 보이는 쪽·문서화가 도는 동안 전체 미리 읽기는 비켜선다
     const worker = async () => {
-      while (k < todo.length && !this.closed && (front || !this._fg)) {
+      while (k < todo.length && valid() && (priority || !this._priorityLayout)) {
         const n = todo[k++];
         await this.pageLayout(n).catch(() => {});
         done++; show();
       }
     };
     try { await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(1, todo.length)) }, worker)); }
-    finally { if (front) this._fg--; }
-    if (!front && k < todo.length && !this.closed) {              // 비켜섰던 미리 읽기: 문서화가 끝나면 남은 쪽을 이어서
+    finally { if (priority) this._priorityLayout--; }
+    if (!priority && k < todo.length && valid()) {                 // 비켜섰던 미리 읽기: 앞 작업이 끝나면 남은 쪽을 이어서
       const wait = () => new Promise((r) => setTimeout(r, 1000));
-      while (this._fg && !this.closed) await wait();
-      if (!this.closed) return this.layoutPages(pages, { concurrency, front });
+      while (this._priorityLayout && valid()) await wait();
+      if (valid()) return this.layoutPages(pages, { concurrency, front, urgent, prefetchEpoch });
     }
     // 앞에서 기다리는 동안 뒤에서 이미 돌던 쪽(같은 약속)도 끝까지 기다린다
     await Promise.all(pages.map((n) => this.layoutCache.get(n)).filter(Boolean)).catch(() => {});
-    if (front) this.state.progress = null; else this.state.aiPrefetch = { done: total, total };
+    if (front) this.state.progress = null; else if (!urgent && valid()) this.state.aiPrefetch = { done: total, total };
+  }
+
+  /** 전체 쪽 분석은 화면이 뜬 뒤 유휴 시간에 시작한다. 새 예약·닫기는 이전 예약을 무효화한다. */
+  scheduleLayoutPrefetch(delay = 1800) {
+    this.cancelLayoutPrefetch();
+    if (this.closed || !this.ppDir || !ppModelsInstalled(this.ppDir)) return;
+    const epoch = this._layoutPrefetchEpoch;
+    this._layoutPrefetchTimer = setTimeout(() => {
+      this._layoutPrefetchTimer = null;
+      const pages = this.pageSizes.map((_, i) => i);
+      this.layoutPages(pages, { concurrency: 1, front: false, prefetchEpoch: epoch }).catch(() => {});
+    }, Math.max(0, delay));
+    this._layoutPrefetchTimer.unref?.();
+  }
+
+  cancelLayoutPrefetch() {
+    this._layoutPrefetchEpoch++;
+    clearTimeout(this._layoutPrefetchTimer);
+    this._layoutPrefetchTimer = null;
+    this.state.aiPrefetch = null;
+  }
+
+  /** 화면에 요청된 쪽과 이웃 쪽을 전체 미리 읽기보다 먼저 분석한다. */
+  prioritizeLayoutPage(n) {
+    if (!this.autoLayout || this.closed || !Number.isInteger(n)) return;
+    const pages = [n, n - 1, n + 1].filter((p) => p >= 0 && p < this.pageSizes.length);
+    this.layoutPages(pages, { concurrency: 1, front: false, urgent: true }).catch(() => {});
   }
 
   /** 쪽 n 의 머리말·꼬리말 영역 [{ bbox, page, label }]. 쪽 위·아래 가장자리(각 20%) 안에 든 상자만 믿는다
@@ -531,6 +572,15 @@ export class PdfSession {
   }
 
   /** 칸 글이 PDF 에서 칸의 위·가운데·아래 어디에 놓였는가(top / middle / bottom) */
+  /** 칸 높이에서 글이 차지한 높이를 뺀 나머지(pt). 글이 없으면 0 */
+  cellFreeHeight(parts, height) {
+    let y0 = Infinity, y1 = -Infinity;
+    for (const p of parts) for (const li of this.res.paragraphs[p.paragraphIndex]?.lines || []) {
+      for (const g of this.res.lines[li].glyphs) { if (/\s/.test(g.c)) continue; y0 = Math.min(y0, g.y0); y1 = Math.max(y1, g.y1); }
+    }
+    return Number.isFinite(y0) ? Math.max(0, height - (y1 - y0)) : 0;
+  }
+
   cellVerticalAlign(parts, top, bottom) {
     let y0 = Infinity, y1 = -Infinity;
     for (const p of parts) for (const li of this.res.paragraphs[p.paragraphIndex]?.lines || []) {
@@ -628,12 +678,14 @@ export class PdfSession {
     const paraHtml = (p, x0, x1) => {
       const para = this.res.paragraphs[p.paragraphIndex], count = new Map();
       let bold = 0, all = 0, centered = 0, lines = 0;
+      const widths = [];
       for (const li of para?.lines || []) {
         const l = this.res.lines[li], gs = l.glyphs.filter((g) => !/\s/.test(g.c));
         if (!gs.length) continue;
         lines++;
         const lx0 = gs[0].x0, lx1 = gs[gs.length - 1].x1;
         if (Math.abs((lx0 + lx1) / 2 - (x0 + x1) / 2) <= 3 && lx0 - x0 > 4) centered++;
+        widths.push([lx1 - lx0, l.size]);
         for (const g of gs) {
           all++; const k = hex(g.color || [0, 0, 0]); count.set(k, (count.get(k) || 0) + 1);
           if ((g.weight || 400) >= 600 || boldFontName(g.font)) bold++;
@@ -641,7 +693,13 @@ export class PdfSession {
       }
       const color = [...count].sort((a, b) => b[1] - a[1])[0]?.[0] || "#000000";
       const css = (color !== "#000000" ? `color:${color};` : "") + (all && bold * 2 > all ? "font-weight:bold;" : "");
-      const align = lines && centered === lines ? "center" : "left";
+      // 여러 줄의 폭이 모두 같고(글자 하나 안쪽) 칸 폭의 80% 이상이면 칸 폭에 꽉 차서 꺾인 보통 문단이다 — 좌우 안쪽 여백이 같은 글상자에서는
+      // 꽉 찬 줄이 모두 칸 한가운데에 놓여 가운데 정렬로 보였다. 가운데 정렬한 글은 줄마다 길이가 다르다.
+      // (칸보다 훨씬 좁은 같은 폭의 줄들 — "기술 / 분류" 같은 두 줄 머리 칸 — 은 가운데 정렬 그대로)
+      // 1칸 글상자(table.edge 가 있는 표)에서만 본다: 여러 칸 표의 좁은 머리 칸("일몰설정 / 예외기준")은 같은 폭 두 줄이 칸을 채워도 가운데 정렬이다.
+      const full = table.edge && widths.length >= 2 && Math.max(...widths.map((w) => w[0])) - Math.min(...widths.map((w) => w[0])) < widths[0][1]
+        && Math.min(...widths.map((w) => w[0])) >= (x1 - x0) * 0.8;
+      const align = lines && centered === lines && !full ? "center" : "left";
       return css ? `<p style="text-align:${align}"><span style="${css}">${esc(p.text)}</span></p>` : `<p style="text-align:${align}">${esc(p.text)}</p>`;
     };
     // 칸 바탕: 칸 가운데를 덮는 채운 도형 가운데 가장 작은 것(칸 넓이의 절반 이상)의 색. 흰색이면 두지 않는다
@@ -652,7 +710,17 @@ export class PdfSession {
         Math.max(0, Math.min(x1, pa.bbox[2]) - Math.max(x0, pa.bbox[0])) * Math.max(0, Math.min(y1, pa.bbox[3]) - Math.max(y0, pa.bbox[1])) >= area * 0.5)
         .sort((a, b) => (a.bbox[2] - a.bbox[0]) * (a.bbox[3] - a.bbox[1]) - (b.bbox[2] - b.bbox[0]) * (b.bbox[3] - b.bbox[1]))[0];
       const c = hit && hex(hit.fill);
-      return c && c !== "#ffffff" ? c : null;
+      if (!c || c === "#ffffff") return null;
+      // 도형의 테두리 상자만으로는 실제로 그 칸이 칠해졌는지 알 수 없다: 머리 행과 번호 열을 한 도형(ㄱ자 모양)으로 칠한 표는
+      // 상자가 표 전체라, 흰 내용 칸까지 모두 검정이 됐다(검정 바탕에 검정 글씨). 색이 있다고 본 칸은 쪽을 그려 실제 색을 확인한다.
+      try {
+        const seen = withPage(this.doc, +m[1], (page) => regionBackgroundColor(page, [x0 + 1, y0 + 1, x1 - 1, y1 - 1]));
+        const rgb = (h) => [1, 3, 5].map((k) => parseInt(h.slice(k, k + 2), 16));
+        const s = rgb(seen), want = rgb(c);
+        if (s.reduce((d, v, k) => d + Math.abs(v - want[k]), 0) <= 60) return c;     // 도형 색 그대로 칠해져 있다(옅은 회색 머리 칸 포함)
+        return s.every((v) => v >= 0xf0) ? null : seen;             // 실제로는 흰 칸, 아니면 위에 덧칠한 다른 색
+      } catch { /* 그리지 못하면 도형 색 그대로 */ }
+      return c;
     };
     const text = new Map();                                          // "행:열" → 칸 문단들
     for (const p of cellParts) { const c = this.partCell(p), k = `${c.row}:${c.col}`; if (!text.has(k)) text.set(k, []); text.get(k).push(p); }
@@ -664,6 +732,7 @@ export class PdfSession {
       const empty = table.rows.every((row, r) => row.cells.some((cell, c) => col(cell.x0) === k && col(cell.x1) === k + 1 && !text.has(`${r}:${c}`)));
       if (empty) gapCols.add(k);
     }
+    const rowHasText = table.rows.map((row, r) => row.cells.some((_, c) => text.has(`${r}:${c}`)));
     const used = new Set();
     const fit = this.fitsColumn(+m[1], table.bbox || [xs[0], table.rows[0].y0, xs[xs.length - 1], table.rows.at(-1).y1]);
     let html = `<table${fit ? ' data-og-fit="1"' : ""} style="border-collapse:collapse">`;
@@ -685,12 +754,15 @@ export class PdfSession {
         const body = parts.length ? parts.map((p) => paraHtml(p, cell.x0, cell.x1)).join("") : "<p></p>";
         const gap = colspan === 1 && gapCols.has(col(cell.x0));
         const bg = gap ? null : cellFill(cell.x0, row.y0, cell.x1, row.y0 + height);
-        // 높이: PDF 행 높이를 "최소 높이"로 알려 준다(글이 넘치면 편집기가 늘린다). 알려 주지 않으면 편집기가 표 전체 높이를
-        // 행마다 약 13px 로 잡아, 두 줄 칸이 하나 있을 때 다른 행을 글자보다 낮게 눌러 맞췄다.
+        // 높이: 글이 있는 행은 작은 최소 높이(12pt)만 알려 주고, 원본의 넉넉함은 위아래 여백으로 옮긴다. 예전에는 PDF 행 높이를
+        // 그대로 알려 줬는데, 편집기 글자가 PDF 보다 커서 줄이 늘어나는 행과 높이가 남는 행이 한 표에 섞이면 편집기가 표 전체
+        // 높이를 알려 준 합에 묶어 두어(남는 행에서 조금 덜어 줄 뿐) 줄이 늘어난 칸의 첫 줄 위가 잘렸다(4행 이상, 본문 폭에 맞춘 표).
+        // 글이 하나도 없는 행은 높이를 알 길이 그것뿐이라 PDF 높이 그대로. (높이를 아예 안 주면 행마다 약 13px 로 눌린다.)
         // 세로 정렬: PDF 에서 글이 칸의 위·가운데·아래 어디에 있었는지로 정한다.
-        const size = `height:${Math.max(parts.length ? 12 : 0, height).toFixed(1)}pt;`;
+        const size = `height:${(rowHasText[r] || parts.length ? 12 : height).toFixed(1)}pt;`;
         const valign = this.cellVerticalAlign(parts, row.y0, row.y0 + height);
-        html += `<td${span} style="width:${(cell.x1 - cell.x0).toFixed(1)}pt;${size}border:${gap ? "none" : "0.5pt solid #000000"};${bg ? `background-color:${bg};` : ""}padding:1.4pt 2.8pt;vertical-align:${valign}">${body}</td>`;
+        const padV = Math.min(6, Math.max(1.4, this.cellFreeHeight(parts, height) / 2)).toFixed(1);
+        html += `<td${span} style="width:${(cell.x1 - cell.x0).toFixed(1)}pt;${size}border:${gap || (table.edge === "none" && bg) ? "none" : `0.5pt solid ${Array.isArray(table.edge) ? hex(table.edge) : "#000000"}`};${bg ? `background-color:${bg};` : ""}padding:${padV}pt 2.8pt;vertical-align:${valign}">${body}</td>`;
       });
       html += "</tr>";
     });
@@ -976,9 +1048,15 @@ export class PdfSession {
         continue;
       }
       const heading = part.heading ?? this.partIsHeading(part);
-      // 빈 줄: 본문이 끝나고 제목이 시작하는 곳에는 하나(제목 바로 뒤 본문은 붙이고, 이어지는 제목은 한 묶음).
+      // 빈 줄: 본문이 끝나고 제목이 시작하는 곳에만 하나(본문 → 빈 줄 → 제목 → 본문). 제목 바로 뒤 본문은 붙이고, 이어지는 제목은 한 묶음.
+      // 2026-10-08 에 "본문과 제목 사이를 띄워 달라"는 말을 제목 뒤에도 넣으라는 뜻으로 잘못 읽어 제목 앞뒤 모두에 넣었다가,
+      // 사용자가 "본문 다음에 오는 제목을 띄우기로 했다"고 바로잡아 되돌렸다. 제목 뒤에는 넣지 않는다.
       // "빈 줄 살리기"면 PDF 에서 문단 사이가 한 줄 이상 벌어진 곳에도 그만큼 넣는다(둘 중 많은 쪽).
-      const blanks = Math.max(previousHeading === false && heading ? 1 : 0, keepBlankLines ? this.blankLinesBetween(previousPart, part) : 0);
+      // 목차 항목끼리는 PDF 의 줄 사이 거리로 빈 줄을 넣지 않는다: 장 제목(큰 글자, 두 줄)과 그 아래 작은 항목처럼 글자 크기와
+      // 줄 간격이 줄마다 달라, 한 묶음인 "장 제목 → 첫 하위 항목" 사이에 빈 줄이 둘씩 들어가고 정작 장 사이에는 안 들어갔다.
+      const tocRun = !!toc && !!previousPart?.toc;
+      const aroundHeading = previousHeading === false && heading;
+      const blanks = Math.max(aroundHeading ? 1 : 0, keepBlankLines && !tocRun ? this.blankLinesBetween(previousPart, part) : 0);
       html += "<p><br></p>".repeat(blanks);
       const tocStyle = toc ? `;tab-stops:right dotted ${toc.width.toFixed(1)}pt` : "";
       if (deferred.length) { html += deferred.join(""); deferred.length = 0; }   // 이어질 줄 알았던 문단이 안 이어졌으면 여기서
@@ -1051,6 +1129,7 @@ export class PdfSession {
 
   /** 원본 쪽 그림(JPEG), 한 번 만든 것은 기억 */
   pageImage(n, scale = 1.5) {
+    this.prioritizeLayoutPage(n);
     if (!this.pageJpeg.has(n)) {
       this.pageJpeg.set(n, withPage(this.doc, n, (page) => renderPageJpeg(page, scale)));
       if (this.pageJpeg.size > 60) this.pageJpeg.delete(this.pageJpeg.keys().next().value);
@@ -1069,13 +1148,43 @@ export class PdfSession {
     return this.pageThumbs.get(n);
   }
 
+  /** 탭은 유지하고 다시 만들 수 있는 화면용 JPEG만 버린다. 문단·OCR·주석·레이아웃 결과는 보존한다. */
+  trimViewCaches() {
+    this.pageJpeg?.clear();
+    this.pageThumbs?.clear();
+  }
+
   /** 원본 보기의 투명 글자 층(복원 전에는 빈 문자열) */
   textLayer(n) { return this.textLayers ? this.textLayers[n].textLayer + renderGraphicText(this.res, n) : ""; }
 
   /** 끌어다 놓을 수 있는 그림 목록(쪽별, pt) */
   figureList() {
     if (!this.state.ready) return null;
-    return (this.res.figures || []).filter((f) => f.kind === "figure").map((f) => ({ page: f.page, id: f.id, bbox: f.bbox }));
+    return (this.res.figures || []).filter((f) => this.figureListed(f)).map((f) => ({ page: f.page, id: f.id, bbox: f.bbox, ...(f.kind === "panel" ? { listOnly: true } : {}) }));
+  }
+
+  /** 그림 추출 목록에 드는가: 그림, 그리고 문서화에서는 표(글상자)가 되는 그림 카드. 카드는 보이는 그대로(글까지) 한 장으로 꺼낸다.
+   *  쪽을 거의 덮는 글상자 바탕은 뺀다(쪽 전체 화면이 될 뿐이다). */
+  figureListed(f) {
+    if (f.kind === "figure") return true;
+    if (f.kind !== "panel") return false;
+    const size = this.pageSizes[f.page] || { w: 595, h: 842 };
+    return (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]) < size.w * size.h * 0.7;
+  }
+
+  /** 표(글상자)가 되는 그림 카드를 보이는 그대로 그림 파일로(추출 목록·ZIP 에서만 쓴다 — 문서화에는 넣지 않는다) */
+  ensurePanelFiles(pageIndexes) {
+    const figuresByPage = this.byPage(this.res.figures || []);
+    for (const pageIndex of new Set(pageIndexes)) {
+      const targets = (figuresByPage.get(pageIndex) || []).filter((f) => f.kind === "panel" && !f.file && this.figureListed(f));
+      if (!targets.length) continue;
+      withPage(this.doc, pageIndex, (page) => {
+        for (const f of targets) {
+          const w = f.bbox[2] - f.bbox[0], h = f.bbox[3] - f.bbox[1];
+          try { f.file = { ext: "jpg", data: renderPageJpeg(page, Math.min(3, 2000 / Math.max(w, h, 1)), 88, f.bbox) }; } catch { /* 그리지 못한 카드는 건너뛴다 */ }
+        }
+      });
+    }
   }
 
   /** 그림(보기 화면에서 끌어 넣을 수 있는 그림과 같은 것)을 ZIP 항목으로: "쪽3-그림02.png" 처럼 쪽·읽는 순서대로.
@@ -1084,9 +1193,9 @@ export class PdfSession {
     if (!this.state.ready) return null;
     // 고른 그림이 있는 쪽만 그림 파일을 만든다(긴 PDF에서 몇 개만 고를 때 빠르게)
     const pagesOf = keys ? [...new Set(keys.map((k) => +String(k).split(":")[0]))].filter((n) => Number.isInteger(n) && n >= 0 && n < this.pageSizes.length) : this.pageSizes.map((_, i) => i);
-    this.ensureFigureFiles(pagesOf);
+    this.ensureFigureFiles(pagesOf); this.ensurePanelFiles(pagesOf);
     // 번호는 보기 화면 목록(figureList)과 같은 순서·같은 그림으로 매긴다
-    const list = (this.res.figures || []).filter((f) => f.kind === "figure")
+    const list = (this.res.figures || []).filter((f) => this.figureListed(f))
       .sort((a, b) => a.page - b.page || a.bbox[1] - b.bbox[1] || a.bbox[0] - b.bbox[0]);
     const want = keys ? new Set(keys.map(String)) : null;
     const pad = (n, w) => String(n).padStart(w, "0"), pw = String(this.pageSizes.length).length, perPage = new Map();
@@ -1101,8 +1210,8 @@ export class PdfSession {
   /** 그림 원본 파일(PDF 에서 꺼낸 그대로) */
   figureFile(page, id) {
     if (!this.state.ready) return null;
-    this.ensureFigureFiles([page]);
-    const f = (this.res.figures || []).find((x) => x.page === page && x.id === id);
+    this.ensureFigureFiles([page]); this.ensurePanelFiles([page]);
+    const f = (this.res.figures || []).find((x) => x.page === page && x.id === id && this.figureListed(x));
     return f && f.file && f.file.data ? f.file : null;
   }
 
@@ -1220,6 +1329,22 @@ export class PdfSession {
             return { w, sp: i < l.words.length - 1 && (at < 0 || /^\s/.test(l.text.slice(pos))) };
           });
         };
+        // OCR도 PDF 글자층과 같은 인용부호 규칙을 쓴다. 같은 문단의 여러 줄을 먼저 합쳐 판단한 뒤
+        // 각 낱말에 되돌려, 화면에서 복사한 글과 문서화한 글의 기호가 달라지지 않게 한다.
+        for (const par of new Set(lines.map((l) => l.par))) {
+          const group = lines.filter((l) => l.par === par);
+          let raw = ""; const refs = [];
+          group.forEach((l, li) => {
+            if (li) { raw += " "; refs.push(null); }
+            spacedWords(l).forEach(({ w, sp }) => {
+              w.text.split("").forEach((c, k) => { raw += c; refs.push({ w, k }); });
+              if (sp) { raw += " "; refs.push(null); }
+            });
+          });
+          const fixed = repairPunctuationText(raw), chars = new Map();
+          refs.forEach((ref, i) => { if (!ref) return; if (!chars.has(ref.w)) chars.set(ref.w, ref.w.text.split("")); chars.get(ref.w)[ref.k] = fixed[i]; });
+          for (const [w, value] of chars) w.text = value.join("");
+        }
         const lineText = (l) => spacedWords(l).map(({ w, sp }) => w.text + (sp ? " " : "")).join("");
         // 낱말 위치를 쪽 좌표(pt)로: 읽을 때 돌린 각도를 되돌린다(화면의 투명 글자 층과 같은 변환 — 아래 css 참고)
         const rad = (ROT_SIGN * r.deg * Math.PI) / 180, cos = Math.cos(rad), sin = Math.sin(rad), hw = r.crop.w / 2, hh = r.crop.h / 2;
@@ -1266,5 +1391,18 @@ export class PdfSession {
     return this.ocrHtml.get(n);
   }
 
-  close() { this.closed = true; try { this.doc?.destroy(); } catch { /* 이미 닫힘 */ } }
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.cancelLayoutPrefetch();
+    clearTimeout(this._layoutSaveTimer);
+    // 끝난 레이아웃 캐시는 닫기 직전에도 남긴다. 계산 중인 PDFium 쪽은 약속이 끝난 뒤 문서를 닫아 충돌을 피한다.
+    const disk = this._layoutDisk;
+    if (disk && this.layoutStore) {
+      try { fs.mkdirSync(path.dirname(this.layoutStore), { recursive: true }); fs.writeFileSync(this.layoutStore, JSON.stringify(disk)); } catch { /* 다음에 다시 계산 */ }
+    }
+    const pending = [...(this.layoutCache?.values() || []), ...(this.ocrHtml?.values() || [])].filter((p) => p && typeof p.then === "function");
+    const destroy = () => { try { this.doc?.destroy(); } catch { /* 이미 닫힘 */ } this.doc = null; this.pageJpeg?.clear(); this.pageThumbs?.clear(); };
+    if (pending.length) Promise.allSettled(pending).then(destroy); else destroy();
+  }
 }

@@ -14,6 +14,15 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
   .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");          // XML 에 쓸 수 없는 제어 문자
 const EXT = { "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/gif": "gif", "image/bmp": "bmp", "image/webp": "webp" };
 const imgExt = (mime) => EXT[String(mime).toLowerCase()] || "png";
+// 그림 바이트: 따로 넘어온 것(data — 복사하지 않고 그대로 본다)이 있으면 그것, 없으면 base64 를 푼다
+const imgBytes = (img) => (img.data ? Buffer.from(img.data.buffer, img.data.byteOffset, img.data.byteLength) : Buffer.from(img.b64 || "", "base64"));
+// 중간 구조의 그림 참조({ img: { ref } })에 따로 넘어온 그림(images[ref] = { mime, bytes })을 이어 준다
+function attachImages(node, images) {
+  if (!node || typeof node !== "object" || !images?.length) return;
+  if (Array.isArray(node)) { for (const x of node) attachImages(x, images); return; }
+  if (node.img && Number.isInteger(node.img.ref) && images[node.img.ref]) { node.img.mime = images[node.img.ref].mime; node.img.data = images[node.img.ref].bytes; }
+  for (const k of Object.keys(node)) if (k !== "data" && node[k] && typeof node[k] === "object") attachImages(node[k], images);
+}
 const TEXT_W_PX = 642;                                                  // A4, 좌우 여백 2cm 기준 본문 폭(96dpi)
 function fitImage(img, maxW = TEXT_W_PX) {
   let w = Math.max(1, Math.round(img.w || 200)), h = Math.max(1, Math.round(img.h || 150));
@@ -62,7 +71,7 @@ export function toDocx(model) {
     if (r.img) {
       const { w, h } = fitImage(r.img);
       const n = media.length + 1, name = `image${n}.${imgExt(r.img.mime)}`, rid = `rIdImg${n}`;
-      media.push({ name, data: Buffer.from(r.img.b64, "base64") });
+      media.push({ name, data: imgBytes(r.img) });
       rels.push(`<Relationship Id="${rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${name}"/>`);
       const cx = w * 9525, cy = h * 9525, id = docPrId++;
       return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="${id}" name="그림 ${id}"/>` +
@@ -170,7 +179,7 @@ export function toOdt(model) {
     if (r.br) return "<text:line-break/>";
     if (r.img) {
       const { w, h } = fitImage(r.img), n = pics.length + 1, name = `Pictures/image${n}.${imgExt(r.img.mime)}`;
-      pics.push({ name, data: Buffer.from(r.img.b64, "base64"), mime: r.img.mime });
+      pics.push({ name, data: imgBytes(r.img), mime: r.img.mime });
       return `<draw:frame draw:name="그림${n}" text:anchor-type="as-char" svg:width="${(w * 0.75).toFixed(2)}pt" svg:height="${(h * 0.75).toFixed(2)}pt" draw:z-index="${n}"><draw:image xlink:href="${name}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/></draw:frame>`;
     }
     const st = textStyle(r), body = textXml(r.text || "");
@@ -251,7 +260,7 @@ export function toRtf(model) {
       const mime = String(r.img.mime).toLowerCase();
       const kind = mime.includes("png") ? "\\pngblip" : /jpe?g/.test(mime) ? "\\jpegblip" : null;
       if (!kind) return "";                                            // RTF 는 PNG·JPEG 만 표준
-      const { w, h } = fitImage(r.img), hex = Buffer.from(r.img.b64, "base64").toString("hex");
+      const { w, h } = fitImage(r.img), hex = imgBytes(r.img).toString("hex");
       return `{\\*\\shppict{\\pict${kind}\\picw${w}\\pich${h}\\picwgoal${w * 15}\\pichgoal${h * 15} ${hex.replace(/(.{128})/g, "$1\n")}}}`;
     }
     let ctl = "";
@@ -307,7 +316,7 @@ export function toEpub(model) {
     if (r.br) return "<br/>";
     if (r.img) {
       const n = images.length + 1, name = `images/image${n}.${imgExt(r.img.mime)}`, { w, h } = fitImage(r.img);
-      images.push({ name, data: Buffer.from(r.img.b64, "base64"), mime: r.img.mime });
+      images.push({ name, data: imgBytes(r.img), mime: r.img.mime });
       return `<img src="${name}" alt="" width="${w}" height="${h}"/>`;
     }
     let t = esc(r.text || "");
@@ -374,8 +383,9 @@ export function toEpub(model) {
   ]);
 }
 
-export function officeExport(format, model) {
+export function officeExport(format, model, images = []) {
   if (!model || !Array.isArray(model.blocks)) throw new Error("내보낼 내용이 없습니다.");
+  attachImages(model.blocks, images);
   if (format === "docx") return toDocx(model);
   if (format === "odt") return toOdt(model);
   if (format === "rtf") return toRtf(model);

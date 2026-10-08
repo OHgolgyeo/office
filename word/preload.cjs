@@ -5,9 +5,15 @@ contextBridge.exposeInMainWorld("ogolgye", {
   save: (bytes, name, filters) => ipcRenderer.invoke("file:save", { bytes, name, filters }),
   saveTo: (bytes, filePath) => ipcRenderer.invoke("file:saveTo", { bytes, filePath }),
   open: (filters) => ipcRenderer.invoke("file:open", { filters }),
-  htmlZip: (html) => ipcRenderer.invoke("export:html-zip", { html }),
+  htmlZip: (html, images) => ipcRenderer.invoke("export:html-zip", { html, images }),
   pdf: (svgs) => ipcRenderer.invoke("export:pdf", { svgs }),
-  office: (format, model) => ipcRenderer.invoke("export:office", { format, model }),
+  pdfStream: {
+    start: (name, filters) => ipcRenderer.invoke("export:pdf-stream-start", { name, filters }),
+    page: (id, svg) => ipcRenderer.invoke("export:pdf-stream-page", { id, svg }),
+    finish: (id) => ipcRenderer.invoke("export:pdf-stream-finish", { id }),
+    cancel: (id) => ipcRenderer.invoke("export:pdf-stream-cancel", { id }),
+  },
+  office: (format, model, images) => ipcRenderer.invoke("export:office", { format, model, images }),
   hwpxFromModel: (model, pageless) => ipcRenderer.invoke("convert:hwpx", { model, pageless }),
   google: {
     status: () => ipcRenderer.invoke("google:status"),

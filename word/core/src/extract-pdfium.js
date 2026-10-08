@@ -4,7 +4,7 @@
 // 이 파일만 PDF 엔진에 의존한다. reconstruct.js 는 여기서 나온 glyph 배열만 본다.
 
 import { PDFiumLibrary } from "@hyzyla/pdfium";
-import { readPageObjects, pageOrigin } from "./extract-objects.js";
+import { readPageObjects, pageOrigin, imageInk } from "./extract-objects.js";
 
 let libPromise = null;
 // 스몰캡·대문자 전용 글꼴(제목용 장식 글꼴 등): 소문자 코드에 대문자 모양을 그린다. 글자층에는 소문자로 남아
@@ -98,7 +98,9 @@ export async function extractGlyphs(bytes, opts = {}) {
         const x = (g.x0 + g.x1) / 2, y = (g.y0 + g.y1) / 2;
         return x >= 0 && x <= p.width && y >= 0 && y <= p.height && !hidden(x, y, g.seq);
       });
-      p.images = images.map(({ _obj, _m, ...img }) => img);
+      // 글 줄에 끼워 넣은 글자 크기의 작은 그림(기울임꼴 따옴표를 그림으로 넣은 PDF)을 문장 부호 글자로 되살린다
+      const marks = punctuationImages(doc, page, p, images);
+      p.images = images.filter((im) => !marks.has(im)).map(({ _obj, _m, ...img }) => img);
       p.paths = paths.filter((pa) => {
         const x = (pa.bbox[0] + pa.bbox[2]) / 2, y = (pa.bbox[1] + pa.bbox[3]) / 2;
         return x >= 0 && x <= p.width && y >= 0 && y <= p.height && !hidden(x, y, pa.seq);
@@ -109,6 +111,54 @@ export async function extractGlyphs(bytes, opts = {}) {
     doc.destroy();
   }
   return { pages };
+}
+
+/** 글 줄에 끼워 넣은 작은 그림 가운데 문장 부호 모양인 것을 글자로 바꿔 p.glyphs 에 넣는다. 바꾼 그림들의 집합을 돌려준다.
+ *  어떤 PDF 는 기울임꼴 따옴표 같은 글자를 글자가 아니라 줄 높이만 한 작은 그림(폭 4pt × 높이 10pt)으로 넣는다. PDFium 은 그것을
+ *  글자로 내주지 않아 따옴표가 통째로 빠졌고, 그림으로 남은 것은 너무 작아 문서에도 들어가지 않았다.
+ *  모양만 보고 정한다: 잉크가 줄의 위쪽에만 있으면 따옴표(세로 획 하나 = ', 둘 = "), 아래쪽에만 있으면 마침표·쉼표.
+ *  줄 높이 전체에 걸친 잉크(글자·아이콘)는 무엇인지 알 수 없으므로 그림 그대로 둔다. */
+function punctuationImages(doc, page, p, images) {
+  const done = new Set();
+  const ink = p.glyphs.filter((g) => g.c.trim() && !g.invisible);
+  if (!ink.length) return done;
+  for (const im of images) {
+    const [x0, y0, x1, y1] = im.bbox, w = x1 - x0, h = y1 - y0;
+    if (!(h >= 4 && h <= 48 && w >= 0.8 && w <= h * 0.9) || im.tilted) continue;
+    // 같은 줄의 글자: 세로로 그림과 절반 이상 겹치고 크기가 비슷하며(그림 높이의 0.6~1.5배) 가로로 가까운 것
+    const row = ink.filter((g) => Math.min(g.y1, y1) - Math.max(g.y0, y0) >= Math.min(g.y1 - g.y0, h) * 0.5 && g.size >= h * 0.6 && g.size <= h * 1.5);
+    const dist = (g) => Math.max(0, g.x0 - x1, x0 - g.x1);
+    const near = row.filter((g) => dist(g) <= g.size * 1.2).sort((a, b) => dist(a) - dist(b))[0];
+    if (!near) continue;
+    // 따옴표 그림은 글자보다 좁다(폭이 글자 크기의 60% 이하). 글자만 한 그림(낫표 ｢ 옆에 겹쳐 놓인 장식 등)은 아니다.
+    if (w > near.size * 0.6 || h > near.size * 1.6) continue;
+    // 그림 개체만 따로 그린다(쪽을 그리면 그림 상자에 걸친 옆 글자의 잉크가 섞여 모양을 잘못 본다)
+    const bm = imageInk(doc, page, im);
+    if (!bm) continue;
+    const W = bm.w, H = bm.h, S = H / h;
+    const dark = (x, y) => bm.ink[y * W + x] === 1;
+    let top = H, bottom = -1, n = 0;
+    const cols = new Array(W).fill(0);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (dark(x, y)) { n++; cols[x]++; if (y < top) top = y; if (y > bottom) bottom = y; }
+    if (n < W * H * 0.02 || bottom < 0) continue;                       // 잉크가 거의 없다
+    // 세로 획 수: 잉크가 있는 세로줄이 이어진 덩어리(1px 틈은 같은 덩어리)
+    let strokes = 0, run = 0, gap = 9, widest = 0;
+    for (let x = 0; x < W; x++) { if (cols[x] > 0) { if (!run && gap > 1) strokes++; run++; gap = 0; if (run > widest) widest = run; } else { run = 0; gap++; } }
+    // 줄 안에서의 세로 위치: 옆 글자의 상자를 줄로 삼는다(그림 상자는 줄보다 클 수 있다)
+    const lineTop = near.y0, lineH = Math.max(1, near.y1 - near.y0);
+    const inkTop = (y0 + top / S - lineTop) / lineH, inkBottom = (y0 + (bottom + 1) / S - lineTop) / lineH;
+    let c = null;
+    // 따옴표만 되살린다: 줄 위쪽에 있고(위 끝이 줄의 35% 안, 아래 끝이 62% 안), 획의 키가 줄 높이의 12~50%이며,
+    // 획 하나하나가 가로보다 세로로 길다. 가로로 긴 잉크(그림으로 넣은 윗줄·밑줄 조각)와 줄 아래쪽의 점(밑줄 조각이 마침표로
+    // 잘못 읽혔다)은 문장 부호로 보지 않는다 — 공개 예제의 시험지·법령 문서에서 밑줄 조각 수십 개가 ' 와 . 이 됐었다.
+    const inkH = (bottom - top + 1) / S, strokeW = widest / S;
+    if (inkTop <= 0.35 && inkBottom <= 0.62 && strokes <= 2 && inkH >= lineH * 0.12 && inkH <= lineH * 0.5 && strokeW <= inkH * 1.1) c = strokes === 2 ? '"' : "'";
+    if (!c) continue;
+    p.glyphs.push({ ...near, c, x0, y0: near.y0, x1, y1: near.y1, ox: x0, oy: near.oy, rawBox: null, hscale: 1, generated: false, hyphen: false,
+      unicodeError: false, unreadable: false, invisible: false, seq: im.seq, ci: -1, fromImage: true });
+    done.add(im);
+  }
+  return done;
 }
 
 // 장식 기호 글꼴(Wingdings·Webdings·ZapfDingbats·…Ornaments 등)은 알파벳 자리에 그림 기호가 들어 있다. 글자 코드대로 읽으면

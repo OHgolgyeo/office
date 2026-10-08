@@ -48,8 +48,18 @@ function cleanTool(raw, old = null) {
 async function jsonRequest(url, { headers, body }) {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 120000);
   try {
-    const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body), signal: controller.signal });
-    const raw = await r.text(); let data;
+    const r = await fetch(url, { method: "POST", redirect: "error", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body), signal: controller.signal });
+    const max = 10 * 1024 * 1024, declared = Number(r.headers.get("content-length") || 0);
+    if (declared > max) throw new Error("API 응답이 너무 큽니다(최대 10MB). ");
+    const chunks = []; let size = 0;
+    if (r.body) {
+      for await (const chunk of r.body) {
+        size += chunk.byteLength;
+        if (size > max) { controller.abort(); throw new Error("API 응답이 너무 큽니다(최대 10MB). "); }
+        chunks.push(Buffer.from(chunk));
+      }
+    }
+    const raw = Buffer.concat(chunks).toString("utf8"); let data;
     try { data = JSON.parse(raw); } catch { data = null; }
     if (!r.ok) throw new Error(data?.error?.message || data?.message || raw.slice(0, 500) || `HTTP ${r.status}`);
     return data ?? raw;

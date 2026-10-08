@@ -241,7 +241,7 @@ function applyAccent(color) {
 }
 async function pickAccent(color) {
   applyAccent(color);
-  await fetch("/api/settings", { method: "POST", body: JSON.stringify({ accent: color }) });
+  await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accent: color }) });
 }
 let accent = "#6b7b3a";
 let subviewPosition = "right";
@@ -254,7 +254,7 @@ function applySubviewPosition(position) {
 }
 async function pickSubviewPosition(position) {
   applySubviewPosition(position);
-  await fetch("/api/settings", { method: "POST", body: JSON.stringify({ subviewPosition }) });
+  await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ subviewPosition }) });
 }
 function applyRuler(visible) {
   rulerVisible = visible !== false;
@@ -262,7 +262,7 @@ function applyRuler(visible) {
 }
 async function pickRuler(visible) {
   applyRuler(visible);
-  await fetch("/api/settings", { method: "POST", body: JSON.stringify({ ruler: rulerVisible }) });
+  await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ruler: rulerVisible }) });
 }
 fetch("/api/settings").then((r) => r.json()).then((st) => {
   accent = st.accent || accent; applyAccent(accent); applySubviewPosition(st.subviewPosition); applyRuler(st.ruler);
@@ -285,6 +285,9 @@ const frameObserver = new MutationObserver((records) => {
 if (workRoot) frameObserver.observe(workRoot, { childList: true, subtree: true });
 
 // 편집 화면 메뉴의 "서브뷰"에서 온 요청
+// PDF 를 열 것 같으면(파일 고르기) 서버가 Kiwi(문단 띄어쓰기 판단)를 미리 불러오게 한다 — 고르는 동안 준비.
+// (이 함수의 정의만 지워지고 부르는 곳이 남아, "서브뷰 열기 → 내 컴퓨터"가 오류로 멈춘 적이 있다)
+const warmPdfPrepare = () => { fetch("/api/prepare-warm", { method: "POST" }).catch(() => {}); };
 async function subviewAction(action) {
   if (action === "close") { await closeAllSubTabs(); return; }
   if (action === "computer") {
@@ -424,8 +427,8 @@ async function insertPdfContent(source, data) {
 // ── 다른 형식으로 내보내기(PDF/TXT/Markdown/압축 HTML)
 const utf8 = (text) => new TextEncoder().encode(text);
 const exportBaseName = () => (main.name || "문서").replace(/\.(?:hwp|hwpx|hml)$/i, "") || "문서";
-async function requestExportData(format) {
-  const r = await askEditor({ type: "ogolgye:export-build", format }, "ogolgye:export-result", 60000, "편집기가 내보내기 자료를 만들지 못했습니다.");
+async function requestExportData(format, liftImages = false) {
+  const r = await askEditor({ type: "ogolgye:export-build", format, liftImages }, "ogolgye:export-result", 60000, "편집기가 내보내기 자료를 만들지 못했습니다.");
   if (!r.ok) throw new Error(r.error || "내보내기 자료를 만들지 못했습니다.");
   return r;
 }
@@ -435,9 +438,21 @@ function webDocument(fragment, title) {
 }
 // ── 3단계 형식(Word·OpenDocument·RTF·EPUB): 문서 HTML → 형식에 상관없는 중간 구조
 const OFFICE_FORMATS = ["docx", "odt", "rtf", "epub"];
-async function officeBytes(format, model) {
-  if (native?.office) return native.office(format, model);                 // 데스크톱 앱
-  const r = await fetch("/api/export-office", { method: "POST", body: JSON.stringify({ format, model }) });   // 브라우저로 띄운 경우
+// 따로 받은 그림(바이트)을 다시 base64 로 중간 구조에 넣는다(바이트를 그대로 못 보내는 길에서만 쓴다)
+function inlineExportImages(node, images) {
+  if (!node || typeof node !== "object" || !images?.length) return node;
+  if (Array.isArray(node)) { for (const x of node) inlineExportImages(x, images); return node; }
+  if (node.img && Number.isInteger(node.img.ref)) {
+    const im = images[node.img.ref];
+    if (im) { let bin = ""; for (let i = 0; i < im.bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, im.bytes.subarray(i, i + 0x8000)); node.img.mime = im.mime; node.img.b64 = btoa(bin); delete node.img.ref; }
+  }
+  for (const k of Object.keys(node)) if (node[k] && typeof node[k] === "object") inlineExportImages(node[k], images);
+  return node;
+}
+async function officeBytes(format, model, images = null) {
+  if (native?.office) return native.office(format, model, images);         // 데스크톱 앱(그림은 바이트 그대로)
+  inlineExportImages(model, images);
+  const r = await fetch("/api/export-office", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ format, model }) });   // 브라우저로 띄운 경우
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "파일을 만들지 못했습니다.");
   return new Uint8Array(await r.arrayBuffer());
 }
@@ -459,8 +474,10 @@ function modelFromHtml(html) {
       const tag = n.tagName.toLowerCase();
       if (tag === "br") { out.push({ br: true }); return; }
       if (tag === "img") {
-        const m = (n.getAttribute("src") || "").match(/^data:([^;,]+);base64,(.+)$/);
-        if (m) out.push({ img: { mime: m[1], b64: m[2], w: +n.getAttribute("width") || n.naturalWidth || 0, h: +n.getAttribute("height") || n.naturalHeight || 0 } });
+        const src = n.getAttribute("src") || "", m = src.match(/^data:([^;,]+);base64,(.+)$/), ref = src.match(/^og-img:(\d+)$/);
+        const size = { w: +n.getAttribute("width") || n.naturalWidth || 0, h: +n.getAttribute("height") || n.naturalHeight || 0 };
+        if (m) out.push({ img: { mime: m[1], b64: m[2], ...size } });
+        else if (ref) out.push({ img: { ref: +ref[1], ...size } });       // 그림 바이트는 따로 넘어온다(내보내기)
         return;
       }
       if (tag === "table") return;                                            // 표는 블록으로 따로
@@ -752,7 +769,7 @@ async function aiAction(source, msg) {
 // ── Google 드라이브에서 열기: 한글·PDF 는 원본, Word·Google 문서는 한글 문서로 바꿔서 연다
 async function hwpxFromModelBytes(model, pageless) {
   if (native?.hwpxFromModel) return native.hwpxFromModel(model, pageless);
-  const r = await fetch("/api/hwpx-from-model", { method: "POST", body: JSON.stringify({ model, pageless }) });
+  const r = await fetch("/api/hwpx-from-model", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, pageless }) });
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "한글 문서를 만들지 못했습니다.");
   return new Uint8Array(await r.arrayBuffer());
 }
@@ -802,10 +819,7 @@ function driveEl() {
   return el;
 }
 function closeDrive() { if (drive.el) drive.el.hidden = true; drive.forcedTarget = null; }
-// PDF 를 열 것 같으면(파일 고르기·드라이브 창) 서버가 Kiwi(문단 띄어쓰기 판단)를 미리 불러오게 한다 — 고르는 동안 준비
-const warmPdfPrepare = () => { fetch("/api/prepare-warm", { method: "POST" }).catch(() => {}); };
 async function openDriveDialog(target = null) {
-  warmPdfPrepare();
   const el = driveEl();
   const targetSelect = el.querySelector(".dv-target");
   drive.forcedTarget = target === "sub" ? "sub" : null;
@@ -924,19 +938,43 @@ async function exportDocument(format) {
   const labels = { pdf: "PDF", txt: "텍스트", md: "Markdown", html: "웹페이지", docx: "Word", odt: "OpenDocument", rtf: "RTF", epub: "EPUB" };
   status(`${labels[format]} 내보내기를 준비하고 있습니다…`);
   try {
-    const data = await requestExportData(format), base = exportBaseName(); let bytes, name;
+    const base = exportBaseName(); let bytes, name;
     if (format === "pdf") {
-      if (!native?.pdf) throw new Error("PDF 내보내기는 데스크톱 앱에서 사용할 수 있습니다.");
-      bytes = await native.pdf(data.svgs); name = `${base}.pdf`;
-    } else if (format === "txt") { bytes = utf8("\ufeff" + textFromHtml(data.html)); name = `${base}.txt`; }
+      if (!native?.pdfStream) throw new Error("PDF 내보내기는 데스크톱 앱에서 사용할 수 있습니다.");
+      const stream = await native.pdfStream.start(`${base}.pdf`, EXPORT_FILTERS.pdf);
+      if (!stream?.id) { status("내보내기를 취소했습니다."); return; }
+      let editorStarted = false;
+      try {
+        const info = await askEditor({ type: "ogolgye:export-pdf-info" }, "ogolgye:export-pdf-result", 60000);
+        editorStarted = !!info.ok;
+        if (!info.ok || !Number.isInteger(info.pageCount) || info.pageCount < 1) throw new Error(info.error || "내보낼 쪽이 없습니다.");
+        for (let page = 0; page < info.pageCount; page++) {
+          status(`PDF 내보내기 중… ${page + 1}/${info.pageCount}`);
+          const part = await askEditor({ type: "ogolgye:export-pdf-page", page }, "ogolgye:export-pdf-result", 60000);
+          if (!part.ok || !part.svg) throw new Error(part.error || `${page + 1}쪽을 만들지 못했습니다.`);
+          await native.pdfStream.page(stream.id, part.svg);
+          part.svg = null;
+        }
+        await askEditor({ type: "ogolgye:export-pdf-end" }, "ogolgye:export-pdf-result", 60000);
+        editorStarted = false;
+        const saved = await native.pdfStream.finish(stream.id);
+        status(`${saved.name || `${base}.pdf`} 파일로 내보냈습니다.`);
+      } catch (err) { await native.pdfStream.cancel(stream.id).catch(() => {}); throw err; }
+      finally { if (editorStarted) await askEditor({ type: "ogolgye:export-pdf-end" }, "ogolgye:export-pdf-result", 5000).catch(() => {}); }
+      return;
+    }
+    // Word·ODT·RTF·EPUB·압축 웹페이지는 그림을 바이트로 따로 받는다(텍스트·Markdown 은 그림을 글 안에 넣거나 버리므로 그대로)
+    const lift = OFFICE_FORMATS.includes(format) || (format === "html" && !!native?.htmlZip);
+    const data = await requestExportData(format, lift);
+    if (format === "txt") { bytes = utf8("\ufeff" + textFromHtml(data.html)); name = `${base}.txt`; }
     else if (format === "md") { bytes = utf8("\ufeff" + markdownFromModel(modelFromHtml(data.html))); name = `${base}.md`; }
     else if (OFFICE_FORMATS.includes(format)) {
       const model = { title: base, blocks: modelFromHtml(data.html) };
-      bytes = await officeBytes(format, model); name = `${base}.${format}`;
+      bytes = await officeBytes(format, model, data.images || null); name = `${base}.${format}`;
     }
     else {
       if (!native?.htmlZip) throw new Error("압축 웹페이지 내보내기는 데스크톱 앱에서 사용할 수 있습니다.");
-      bytes = await native.htmlZip(webDocument(data.html, base)); name = `${base}-웹페이지.zip`;
+      bytes = await native.htmlZip(webDocument(data.html, base), data.images || null); name = `${base}-웹페이지.zip`;
     }
     const saved = await saveBytes(bytes, name, null, EXPORT_FILTERS[format], true);
     status(saved ? `${saved.name || name} 파일로 내보냈습니다.` : "내보내기를 취소했습니다.");
@@ -950,6 +988,15 @@ async function openDroppedSubview(raw) {
 }
 addEventListener("message", (e) => {
   if (e.origin !== location.origin || !e.data) return;
+  const editorSource = main.editor?.element?.contentWindow === e.source || subTabs.some((tab) => tab.editor?.element?.contentWindow === e.source);
+  // PDF 탭의 element 는 탭 자리(div)이고 보기 화면은 그 안의 iframe 이다. div 의 contentWindow(없음)와 비교하면 PDF 보기에서 온
+  // 메시지가 하나도 통과하지 못해 문서화 결과가 조용히 버려졌다(문서화 단추를 눌러도 아무 일도 일어나지 않음).
+  const pdfSource = subTabs.some((tab) => tab.kind === "pdf" && tab.element?.querySelector("iframe")?.contentWindow === e.source);
+  const editorMessages = new Set(["ogolgye:subview", "ogolgye:theme-pick", "ogolgye:subview-position", "ogolgye:view-pick", "ogolgye:ocr-updated", "ogolgye:export-pick", "ogolgye:google", "ogolgye:ai", "ogolgye:drive-open", "ogolgye:doc-name", "ogolgye:image-dropped", "ogolgye:subview-drop"]);
+  // 파일 끌어다 놓기(subview-drop)는 PDF 보기 화면도 보낸다(열어 둔 PDF 위에 다른 PDF 를 놓으면 새 탭으로)
+  const fromPdfViewer = pdfSource && e.data.type === "ogolgye:subview-drop";
+  if (editorMessages.has(e.data.type) && !editorSource && !fromPdfViewer) return;
+  if (e.data.type === "ogolgye:documentize" && !pdfSource) return;
   if (e.data.type === "ogolgye:subview") subviewAction(e.data.action);
   if (e.data.type === "ogolgye:theme-pick") pickAccent(e.data.color);
   if (e.data.type === "ogolgye:subview-position") pickSubviewPosition(e.data.position);
@@ -1028,11 +1075,19 @@ addEventListener("beforeunload", (e) => {
   if (!native && (main.dirty || subTabs.some((tab) => tab.kind === "doc" && tab.dirty))) { e.preventDefault(); e.returnValue = ""; }
 });
 
+// 편집기의 "바뀜" 표시만 읽는다. 예전에는 getDocumentState 로 물었는데, 그 함수는 문서 전체를 파일로 내보내 지문(SHA)까지
+// 만든다 — 1.2초마다, 열어 둔 문서마다 0.1~0.25초씩 화면이 멈췄다(가만히 있어도, 타자·스크롤 중에도). 표시만 바로 읽는다.
+async function editorDirty(who) {
+  const og = who.editor?.element?.contentWindow?.__ogolgyeStudio;
+  if (typeof og?.isDirty === "function") return !!og.isDirty();
+  const st = await who.editor.getDocumentState();                  // 연결 통로가 없는 옛 편집 화면
+  return st ? !!st.dirty : null;
+}
 // ── 저장 안 한 변경 표시: 편집기에 주기적으로 묻는다
 setInterval(async () => {
   for (const who of [main, ...subTabs]) {
     if (!who.editor || (who !== main && who.kind !== "doc")) continue;
-    try { const st = await who.editor.getDocumentState(); if (st && st.dirty !== who.dirty) setDirty(who, !!st.dirty); } catch { /* 불러오는 중 */ }
+    try { const dirty = await editorDirty(who); if (dirty !== null && dirty !== who.dirty) setDirty(who, dirty); } catch { /* 불러오는 중 */ }
   }
 }, 1200);
 

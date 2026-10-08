@@ -374,16 +374,20 @@ addEventListener('mouseup',e=>{if(hlMode&&e.button===0&&!e.target.closest('.menu
 document.addEventListener('click',e=>{if(!e.target.closest('.pop,#hl-caret'))hlPop.classList.remove('open');if(!noteMode||e.target.closest('.sticky'))return;const sheet=e.target.closest('.sheet');if(!sheet||e.target.closest('.menu,.ann-panel'))return;e.preventDefault();const sr=sheet.getBoundingClientRect(),page=+sheet.closest('.pg').dataset.n;setNoteMode(false);addNote(page,(e.clientX-sr.left)/sr.width*100,(e.clientY-sr.top)/sr.height*100);},true);
 addEventListener('keydown',e=>{if(e.key==='Escape'){setNoteMode(false);setHlMode(false);hlPop.classList.remove('open');ctx.classList.remove('open');}});
 addEventListener('scroll',()=>{clearTimeout(markBookmarkButton._t);markBookmarkButton._t=setTimeout(markBookmarkButton,80);},{passive:true});
+let docStageTimer=null;
+function stopDocStageTimer(){if(docStageTimer){clearInterval(docStageTimer);docStageTimer=null;}}
+function showInsertTime(started){busy('문서에 넣는 중… '+durationText(Date.now()-started)+' 경과');}
 addEventListener('message',e=>{
   if(e.origin!==location.origin||!e.data)return;
   if(e.data.type==='ogolgye:theme')document.documentElement.style.setProperty('--og-accent',e.data.color);
   if(e.data.type==='ogolgye:ocr-updated')document.querySelectorAll('.pg[data-tl]').forEach(s=>{s.dataset.ocr='';loadOcr(s);});   // 언어를 바꾸면 다시 읽는다
   // 본문 JSON을 다 받은 시점이 아니라, 바깥 편집기가 실제 삽입 처리를 시작한 시점에 두 번째 단계로 바꾼다.
   if(e.data.type==='ogolgye:documentize-stage'&&e.data.stage==='insert'){
-    btn.textContent='문서에 넣는 중…';busy('문서에 넣는 중…');
+    stopDocStageTimer();const started=Date.now();btn.textContent='문서에 넣는 중…';showInsertTime(started);
+    docStageTimer=setInterval(()=>showInsertTime(started),1000);
   }
   if(e.data.type==='ogolgye:documentized'){
-    btn.disabled=false;btn.textContent='문서화 ▾';busy('');
+    stopDocStageTimer();btn.disabled=false;btn.textContent='문서화 ▾';busy('');
     if(!e.data.ok)toast('문서화하지 못했습니다.\\n'+(e.data.error||''));
   }
 });
@@ -393,7 +397,7 @@ async function poll(){
   try{
     const st=await (await fetch('/pdf/'+ID+'/status')).json();
     if(st.error){btn.title='변환할 수 없습니다: '+st.error;busy('');return;}
-    if(!st.ready&&st.progress){btn.textContent='준비 중…';busy('문서화 준비 중… '+progressText(st.progress));}
+    if(!st.ready&&st.progress){btn.textContent='준비 중…';busy('문서화 준비 중… '+progressText(st.progress,null,st.t0||Date.now()));}
     if(st.ready){
       ready=true;btn.disabled=false;btn.textContent='문서화 ▾';busy('');OCR_PAGES=new Set(st.ocrPages||[]);
       try{FIGS=await (await fetch('/pdf/'+ID+'/figures')).json();}catch{FIGS=[];}
@@ -496,21 +500,25 @@ ruleBoxes.forEach(x=>x.addEventListener('change',async()=>{
   if(x.dataset.rule==='scanTables'&&x.checked&&!(await installScanTables(x))){x.checked=false;return;}
   RULES={...RULES,[x.dataset.rule]:x.checked};saveRules();
 }));
-// 진행 표시: "글자 읽기 23/96", 레이아웃 분석은 남은 시간도(지금까지 속도로 어림)
-function progressText(p,eta){
+// 진행 표시: 첫 처리 단위가 끝난 뒤 지금까지의 실제 속도로 남은 시간을 어림한다.
+function durationText(ms){const sec=Math.max(0,Math.floor(ms/1000));if(sec<60)return sec+'초';const min=Math.floor(sec/60),rest=sec%60;return min+'분'+(rest?' '+rest+'초':'');}
+function progressText(p,eta,started){
   if(!p)return '';
-  const n=p.total?' '+p.done+'/'+p.total+(p.phase==='레이아웃 분석'?'쪽':''):'';
+  const n=p.total?' '+p.done+'/'+p.total+(['레이아웃 분석','그림 글자 읽기'].includes(p.phase)?'쪽':''):'';
+  const elapsed=' · '+durationText(Date.now()-started)+' 경과';
   let left='';
-  if(eta&&p.total&&p.done>eta.done0){const per=(Date.now()-eta.t0)/(p.done-eta.done0),sec=Math.round(per*(p.total-p.done)/1000);if(sec>=5)left=' · 약 '+(sec>=90?Math.round(sec/60)+'분':sec+'초')+' 남음';}
-  return p.phase+n+left;
+  if(eta&&p.total&&p.done>eta.done0){const per=(Date.now()-eta.t0)/(p.done-eta.done0),ms=Math.max(0,per*(p.total-p.done));left=' · 약 '+durationText(ms)+' 남음';}
+  else if(p.total&&p.done<p.total)left=' · 예상 시간 계산 중';
+  return p.phase+n+elapsed+left;
 }
 async function documentize(pages,useRules){
-  docbox.classList.remove('open');btn.disabled=true;btn.textContent='본문 만드는 중…';busy('본문 만드는 중…');
+  docbox.classList.remove('open');stopDocStageTimer();btn.disabled=true;btn.textContent='본문 만드는 중…';
+  const started=Date.now();busy('본문 만드는 중… 0초 경과 · 예상 시간 계산 중');
   const slow=setTimeout(()=>{if(!(useRules&&RULES.scanTables))toast('사진·스캔 속 글자를 읽고 있어 시간이 조금 걸립니다.');},1500);
   const flag=v=>useRules&&v?'1':'0';
   // 서버가 알려 주는 진행(레이아웃 분석 몇 쪽째)을 단추에 보여 준다 — 긴 PDF 에서 멈춘 것처럼 보이지 않게
   let eta=null,watching=true;
-  (async()=>{while(watching){try{const st=await (await fetch('/pdf/'+ID+'/status')).json();if(watching&&st.progress){if(!eta||eta.phase!==st.progress.phase)eta={phase:st.progress.phase,t0:Date.now(),done0:st.progress.done};busy('본문 만드는 중… '+progressText(st.progress,eta));}}catch{}await new Promise(r=>setTimeout(r,700));}})();
+  (async()=>{while(watching){try{const st=await (await fetch('/pdf/'+ID+'/status')).json();if(watching){if(st.progress){if(!eta||eta.phase!==st.progress.phase)eta={phase:st.progress.phase,t0:Date.now(),done0:st.progress.done};busy('본문 만드는 중… '+progressText(st.progress,eta,started));}else busy('본문 만드는 중… '+durationText(Date.now()-started)+' 경과 · 예상 시간 계산 중');}}catch{}await new Promise(r=>setTimeout(r,700));}})();
   try{
     const r=await fetch('/pdf/'+ID+'/content?pages='+pages.join(',')+'&images='+flag(RULES.objectImages)+'&tables='+flag(RULES.tables)+'&blanks='+flag(RULES.blankLines)+'&scan='+flag(RULES.scanTables));const data=await r.json();
     if(!r.ok)throw Error(data.error||'본문을 만들지 못했습니다.');

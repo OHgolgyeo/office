@@ -209,18 +209,27 @@ export class PdfSession {
     const pages = [...new Set(pageIndexes)].sort((a, b) => a - b);
     const queue = new Map();                                   // 쪽 → 아직 넣지 않은 OCR 문단(위에서 아래)
     const useTables = scanTables && this.ppDir && ppModelsInstalled(this.ppDir);
-    for (const n of pages) {
-      if (!this.isScanPage(n)) { queue.set(n, []); continue; }
-      await this.ocrPage(n);
-      let q = [...(this.ocrParas.get(n) || [])];
-      // 스캔본 표 인식(PP-Structure): 표 영역의 OCR 문단을 빼고 그 자리에 표를 넣는다
-      if (useTables) {
-        const tables = await this.scanTables(n).catch(() => []);
-        const inside = (p, b) => p.x >= b[0] && p.x <= b[2] && p.y >= b[1] - 2 && p.y <= b[3];
-        q = q.filter((p) => !tables.some((t) => inside(p, t.bbox)));
-        for (const t of tables) q.push({ text: t.text, html: t.html, page: n, y: t.bbox[1] });
+    const scanPages = pages.filter((n) => this.isScanPage(n));
+    let scanDone = 0;
+    if (scanPages.length) this.state.progress = { phase: "그림 글자 읽기", done: 0, total: scanPages.length };
+    try {
+      for (const n of pages) {
+        if (!this.isScanPage(n)) { queue.set(n, []); continue; }
+        await this.ocrPage(n);
+        let q = [...(this.ocrParas.get(n) || [])];
+        // 스캔본 표 인식(PP-Structure): 표 영역의 OCR 문단을 빼고 그 자리에 표를 넣는다
+        if (useTables) {
+          const tables = await this.scanTables(n).catch(() => []);
+          const inside = (p, b) => p.x >= b[0] && p.x <= b[2] && p.y >= b[1] - 2 && p.y <= b[3];
+          q = q.filter((p) => !tables.some((t) => inside(p, t.bbox)));
+          for (const t of tables) q.push({ text: t.text, html: t.html, page: n, y: t.bbox[1] });
+        }
+        queue.set(n, q.sort((a, b) => a.y - b.y));
+        scanDone++;
+        this.state.progress = { phase: "그림 글자 읽기", done: scanDone, total: scanPages.length };
       }
-      queue.set(n, q.sort((a, b) => a.y - b.y));
+    } finally {
+      if (scanPages.length) this.state.progress = null;
     }
     const out = [];
     let lastIndex = -1;                                       // 그림 자리(beforeParagraph)는 앞선 글 문단 번호를 따른다

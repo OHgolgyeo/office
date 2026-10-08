@@ -1,7 +1,7 @@
 {
   "name": "ogolgye-word",
   "productName": "오골계 워드",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "HWP 편집기 + PDF 줄바꿈 복원 보기 (로컬 전용)",
   "author": "오골계 (@5golgyeo, https://x.com/5golgyeo)",
   "license": "SEE LICENSE IN LICENSE",

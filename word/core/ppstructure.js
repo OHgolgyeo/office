@@ -49,7 +49,18 @@ export async function installPpModels(dir, onProgress = () => {}) {
 }
 function fileOk(dir, m) { try { return fs.statSync(path.join(dir, m.file)).size === m.size; } catch { return false; } }
 
-let sessions = null, ortPromise = null, loading = null;
+let sessions = null, ortPromise = null, loading = null, modelIdleTimer = null;
+const MODEL_IDLE_MS = 10 * 1000;
+function releaseModelsSoon() {
+  clearTimeout(modelIdleTimer);
+  modelIdleTimer = setTimeout(() => {
+    const current = sessions;
+    if (!current?.child || current.pending?.size) return;
+    sessions = null;
+    try { current.child.kill(); } catch { /* 이미 끝남 */ }
+  }, MODEL_IDLE_MS);
+  modelIdleTimer.unref?.();
+}
 // 모델은 따로 도는 프로세스(ort-process.mjs)에서 돌린다: run() 이 부른 스레드를 계산 내내 붙잡아, 서버에서 바로 돌리면
 // 큰 PDF 의 레이아웃 분석 동안(쪽마다 1.5~4초) 쪽 그림·글자층 요청이 모두 멈췄다. 작업 스레드로 옮기면 앱을 끌 때
 // 계산 중인 쪽이 끝나기를 기다려 종료가 늦었다 — 프로세스는 바로 끝낼 수 있다. 못 띄우면 예전처럼 여기서.
@@ -83,15 +94,17 @@ async function processModels(dir) {
     run: (feeds) => new Promise((resolve, reject) => {
       const id = ++seq, plain = {};
       for (const [k, v] of Object.entries(feeds)) plain[k] = { type: v.type, data: v.data, dims: v.dims };
+      clearTimeout(modelIdleTimer); modelIdleTimer = null;
       pending.set(id, { resolve, reject });
       child.channel?.ref?.();                                      // 계산 중에는 연결을 붙잡고, 다 끝나면 놓는다
       child.send({ id, model, feeds: plain }, (err) => { if (err) { pending.delete(id); reject(err); } });
-    }).finally(() => { if (!pending.size) child.channel?.unref?.(); }),
+    }).finally(() => { if (!pending.size) { child.channel?.unref?.(); releaseModelsSoon(); } }),
   });
-  return { dir, ort: { Tensor: TensorLike }, layout: mk("layout"), table: mk("table"), child };
+  return { dir, ort: { Tensor: TensorLike }, layout: mk("layout"), table: mk("table"), child, pending };
 }
 /** 앱을 끌 때: 모델 프로세스를 바로 끝낸다(계산 중이어도 기다리지 않는다) */
 export function shutdownModels() {
+  clearTimeout(modelIdleTimer); modelIdleTimer = null;
   try { sessions?.child?.kill(); } catch { /* 이미 끝남 */ }
   sessions = null;
 }

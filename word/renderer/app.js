@@ -284,14 +284,11 @@ const frameObserver = new MutationObserver((records) => {
 });
 if (workRoot) frameObserver.observe(workRoot, { childList: true, subtree: true });
 
-// 편집 화면 메뉴의 "서브뷰"에서 온 요청
-// PDF 를 열 것 같으면(파일 고르기) 서버가 Kiwi(문단 띄어쓰기 판단)를 미리 불러오게 한다 — 고르는 동안 준비.
-// (이 함수의 정의만 지워지고 부르는 곳이 남아, "서브뷰 열기 → 내 컴퓨터"가 오류로 멈춘 적이 있다)
-const warmPdfPrepare = () => { fetch("/api/prepare-warm", { method: "POST" }).catch(() => {}); };
+// 편집 화면 메뉴의 "서브뷰"에서 온 요청. 파일을 고르는 단계에서는 문서인지 PDF인지 아직 모르므로
+// Kiwi를 미리 불러오지 않는다(모델 하나가 수백 MB라 선택 창만 열어도 메모리가 급증했다).
 async function subviewAction(action) {
   if (action === "close") { await closeAllSubTabs(); return; }
   if (action === "computer") {
-    warmPdfPrepare();
     const f = await pickFile(SUBVIEW_FILTERS);
     if (f) await openSubAny(f);
   }
@@ -378,9 +375,11 @@ async function waitDocChange(before) {
 async function insertPdfContent(source, data) {
   if (!subTabs.some((tab) => tab.kind === "pdf" && String(data.id) === String(tab.viewerId))) return;
   const reply = (ok, error = "") => source?.postMessage({ type: "ogolgye:documentized", ok, error }, location.origin);
+  const stage = (name) => source?.postMessage({ type: "ogolgye:documentize-stage", stage: name }, location.origin);
   const fail = (err) => { status("문서화에 실패했습니다."); reply(false, String(err?.message || err)); };
   const text = String(data.text || "");
   if (!text) { reply(false, "가져올 본문이 없습니다."); return; }
+  stage("insert");
   status("PDF 내용을 문서에 넣고 있습니다…");
   // 그림은 편집기의 파일 붙여넣기 경로가 필요하다. 글만 있으면 전체 HTML을 한 번에 넣는다.
   if (/<img\b|data-og-page-break|data-og-list/i.test(String(data.html || ""))) {

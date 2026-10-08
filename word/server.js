@@ -37,7 +37,7 @@ const prepJobs = new Map();
 // Kiwi(문단 띄어쓰기 판단)는 작업 스레드 안에서 약 900MB 를 차지하고(WebAssembly 메모리라 한 번 늘면 줄지 않는다),
 // PDF 를 준비할 때(글자 추출 뒤 문단 복원)만 쓴다 → 준비가 끝나고 이만큼 아무 PDF 도 준비하지 않으면 작업 스레드를 끝내
 // 메모리를 돌려받는다. 다음 PDF 는 새 작업 스레드가 Kiwi 를 다시 불러온다(뒤에서 약 2~3초 더).
-const PREP_IDLE_MS = +process.env.OG_PREP_IDLE_MS || 45 * 1000;
+const PREP_IDLE_MS = +process.env.OG_PREP_IDLE_MS || 5 * 1000;
 function schedulePrepRelease() {
   clearTimeout(prepIdleTimer);
   prepIdleTimer = setTimeout(() => {
@@ -118,14 +118,9 @@ async function openPdf(bytes, name) {
   s.ocrLanguages = loadSettings().ocrLanguages;
   s.autoLayout = !!loadSettings().pdfRules?.scanTables;
   sessions.set(id, s);
-  // 기다리지 않는다(뒤에서). 준비가 끝나면, 레이아웃 분석을 켜 둔 경우 모든 쪽의 레이아웃을 한 쪽씩 미리 읽어 둔다
-  // (문서화를 누를 때 96쪽이면 2분 넘게 기다렸다). 문서화를 누르면 같은 기억을 이어 쓰고 두 쪽씩 동시에 돈다.
-  s.prepareConversion(spacer, prepareInWorker).then(async () => {   // spacer: 작업 스레드를 못 쓸 때만 여기서 불러온다
-    if (!s.state.ready || !loadSettings().pdfRules?.scanTables) return;
-    const { ppModelsInstalled } = await import("./core/ppstructure.js");
-    if (!ppModelsInstalled(PP_DIR)) return;
-    s.scheduleLayoutPrefetch();
-  });
+  // 글자층·줄바꿈 복원만 뒤에서 준비한다. 무거운 ONNX 레이아웃 분석은 PDF를 보는 것만으로 시작하지 않고,
+  // 사용자가 문서화에서 "스캔 표 인식"을 실제로 선택했을 때 고른 페이지만 실행한다.
+  s.prepareConversion(spacer, prepareInWorker);                    // spacer: 작업 스레드를 못 쓸 때만 여기서 불러온다
   return { id, name, pages: s.pageSizes.length, ms: Date.now() - s.state.t0 };
 }
 
@@ -470,7 +465,7 @@ export function startServer(port = 0, { authToken = "" } = {}) {
         const settings = patch ? saveSettings(patch) : loadSettings();
         if (patch && Object.prototype.hasOwnProperty.call(patch, "pdfRules")) for (const s of sessions.values()) {
           s.autoLayout = !!settings.pdfRules.scanTables;
-          if (s.autoLayout && s.state.ready) s.scheduleLayoutPrefetch(); else s.cancelLayoutPrefetch();
+          s.cancelLayoutPrefetch();                               // 설정만 바꿀 때는 분석하지 않고 문서화 요청 때 실행
         }
         sendJson(res, 200, settings); return;
       }

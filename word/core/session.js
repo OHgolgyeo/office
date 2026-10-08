@@ -1124,15 +1124,18 @@ export class PdfSession {
     } catch (e) {
       this.state.progress = null;
       this.state.error = String(e && e.message || e);
+    } finally {
+      // PDFium 문서와 추출 결과가 준비된 뒤에는 업로드 원본 바이트를 따로 들고 있을 필요가 없다.
+      // 큰 PDF에서 원본 Buffer + PDFium 내부 복사본이 열린 내내 중복되던 메모리를 돌려준다.
+      this.bytes = null;
     }
   }
 
   /** 원본 쪽 그림(JPEG), 한 번 만든 것은 기억 */
   pageImage(n, scale = 1.5) {
-    this.prioritizeLayoutPage(n);
     if (!this.pageJpeg.has(n)) {
       this.pageJpeg.set(n, withPage(this.doc, n, (page) => renderPageJpeg(page, scale)));
-      if (this.pageJpeg.size > 60) this.pageJpeg.delete(this.pageJpeg.keys().next().value);
+      if (this.pageJpeg.size > 12) this.pageJpeg.delete(this.pageJpeg.keys().next().value);
     }
     return this.pageJpeg.get(n);
   }
@@ -1143,7 +1146,7 @@ export class PdfSession {
     if (!this.pageThumbs.has(n)) {
       const size = this.pageSizes[n] || { w: 595, h: 842 };
       this.pageThumbs.set(n, withPage(this.doc, n, (page) => renderPageJpeg(page, Math.min(0.5, 240 / Math.max(size.w, 1)), 75)));   // 폭 약 240px
-      if (this.pageThumbs.size > 400) this.pageThumbs.delete(this.pageThumbs.keys().next().value);
+      if (this.pageThumbs.size > 48) this.pageThumbs.delete(this.pageThumbs.keys().next().value);
     }
     return this.pageThumbs.get(n);
   }

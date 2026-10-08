@@ -8,6 +8,7 @@ import { PNG } from "pngjs";
 
 let workerP = null;
 let workerKey = "";
+let workerIdleTimer = null;
 const queue = [];
 let busy = false;
 const workerPath = fileURLToPath(new URL("./tesseract-worker.cjs", import.meta.url));
@@ -17,6 +18,7 @@ export function ocrAvailable(langDir, languages = ["kor", "eng"]) {
 }
 
 async function worker(langDir, languages) {
+  clearTimeout(workerIdleTimer); workerIdleTimer = null;
   const langs = [...new Set(languages || ["kor", "eng"])];
   const key = `${path.resolve(langDir)}\0${langs.join("+")}`;
   if (workerP && workerKey !== key) {
@@ -41,9 +43,20 @@ async function worker(langDir, languages) {
 
 /** 앱을 끌 때: OCR 작업자를 끝낸다(읽는 중이어도 기다리지 않는다) */
 export function shutdownOcr() {
+  clearTimeout(workerIdleTimer); workerIdleTimer = null;
   const p = workerP; workerP = null; workerKey = "";
   queue.length = 0;
   if (p) p.then((w) => w.terminate()).catch(() => {});
+}
+
+function releaseWorkerSoon() {
+  clearTimeout(workerIdleTimer);
+  workerIdleTimer = setTimeout(() => {
+    if (busy || queue.length || !workerP) return;
+    const p = workerP; workerP = null; workerKey = "";
+    p.then((w) => w.terminate()).catch(() => {});
+  }, 10 * 1000);
+  workerIdleTimer.unref?.();
 }
 
 // 한 번에 하나씩(Tesseract 작업자 하나를 돌려 쓴다)
@@ -54,7 +67,7 @@ async function pump() {
   if (busy || !queue.length) return;
   busy = true;
   const { fn, ok, fail } = queue.shift();
-  try { ok(await fn()); } catch (e) { fail(e); } finally { busy = false; pump(); }
+  try { ok(await fn()); } catch (e) { fail(e); } finally { busy = false; if (queue.length) pump(); else releaseWorkerSoon(); }
 }
 
 function rotateRGBA(src, w, h, deg) {

@@ -2,7 +2,7 @@
 export function buildShellHtml(id, meta) {
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const pages = meta.pages.map((p, i) => `<section class="pg" data-n="${i}" style="--w:${p.w}pt;--h:${p.h}pt">
-  <div class="sheet"><div class="loading">PDF를 불러오고 있습니다.</div><img class="bg" data-src="/pdf/${id}/page/${i}.jpg" alt="" onload="this.previousElementSibling.remove()"><div class="ann-layer"></div><div class="tlayer"></div></div>
+  <div class="sheet"><div class="loading">PDF를 불러오고 있습니다.</div><img class="bg" data-src="/pdf/${id}/page/${i}.jpg" alt="" onload="const p=this.previousElementSibling;if(p&&p.classList.contains('loading'))p.remove()"><div class="ann-layer"></div><div class="tlayer"></div></div>
 </section>`).join("\n");
   return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(meta.name)}</title>
@@ -378,6 +378,10 @@ addEventListener('message',e=>{
   if(e.origin!==location.origin||!e.data)return;
   if(e.data.type==='ogolgye:theme')document.documentElement.style.setProperty('--og-accent',e.data.color);
   if(e.data.type==='ogolgye:ocr-updated')document.querySelectorAll('.pg[data-tl]').forEach(s=>{s.dataset.ocr='';loadOcr(s);});   // 언어를 바꾸면 다시 읽는다
+  // 본문 JSON을 다 받은 시점이 아니라, 바깥 편집기가 실제 삽입 처리를 시작한 시점에 두 번째 단계로 바꾼다.
+  if(e.data.type==='ogolgye:documentize-stage'&&e.data.stage==='insert'){
+    btn.textContent='문서에 넣는 중…';busy('문서에 넣는 중…');
+  }
   if(e.data.type==='ogolgye:documentized'){
     btn.disabled=false;btn.textContent='문서화 ▾';busy('');
     if(!e.data.ok)toast('문서화하지 못했습니다.\\n'+(e.data.error||''));
@@ -418,7 +422,7 @@ document.addEventListener('dragstart',e=>{
 const visible=new Set();
 function loadPage(sec){
   const n=sec.dataset.n, img=sec.querySelector('.bg');
-  if(!img.src)img.src=img.dataset.src;
+  if(!img.hasAttribute('src'))img.src=img.dataset.src;
   if(ready&&!sec.dataset.tl){sec.dataset.tl=1;fetch('/pdf/'+ID+'/text/'+n).then(r=>r.text()).then(h=>{sec.querySelector('.tlayer').innerHTML=figHtml(n)+h;fitTextLayer(sec);renderAnnotationsPage(+n);loadOcr(sec);});}
 }
 // 사진·스캔처럼 글자 데이터가 없는 곳의 글자(OCR): 글자 층을 깐 뒤 뒤에서 읽고, 끝나면 투명 글자를 덧붙인다
@@ -446,7 +450,8 @@ function pumpOcr(){
   }).then(h=>{badge.remove();sec.dataset.ocr='done';if(h){layer.insertAdjacentHTML('beforeend',h);fitTextLayer(sec);}}).catch(()=>badge.remove())
     .finally(()=>{ocrBusy=false;pumpOcr();});
 }
-const io=new IntersectionObserver(es=>{es.forEach(e=>{const s=e.target;if(e.isIntersecting){visible.add(s);loadPage(s);}else visible.delete(s);});pumpOcr();},{rootMargin:'1200px 0px'});
+const pageUnload=new WeakMap();
+const io=new IntersectionObserver(es=>{es.forEach(e=>{const s=e.target;if(e.isIntersecting){clearTimeout(pageUnload.get(s));visible.add(s);loadPage(s);}else{visible.delete(s);clearTimeout(pageUnload.get(s));pageUnload.set(s,setTimeout(()=>{if(visible.has(s))return;const img=s.querySelector('.bg');if(img)img.removeAttribute('src');},3000));}});pumpOcr();},{rootMargin:'1200px 0px'});
 document.querySelectorAll('.pg').forEach(s=>io.observe(s));
 function placeDocMenu(){
   const menu=docbox.querySelector('.docmenu'),r=btn.getBoundingClientRect(),gap=5;
@@ -500,16 +505,18 @@ function progressText(p,eta){
   return p.phase+n+left;
 }
 async function documentize(pages,useRules){
-  docbox.classList.remove('open');btn.disabled=true;btn.textContent='문서화 중…';busy('문서화 중…');
+  docbox.classList.remove('open');btn.disabled=true;btn.textContent='본문 만드는 중…';busy('본문 만드는 중…');
   const slow=setTimeout(()=>{if(!(useRules&&RULES.scanTables))toast('사진·스캔 속 글자를 읽고 있어 시간이 조금 걸립니다.');},1500);
   const flag=v=>useRules&&v?'1':'0';
   // 서버가 알려 주는 진행(레이아웃 분석 몇 쪽째)을 단추에 보여 준다 — 긴 PDF 에서 멈춘 것처럼 보이지 않게
   let eta=null,watching=true;
-  (async()=>{while(watching){try{const st=await (await fetch('/pdf/'+ID+'/status')).json();if(watching&&st.progress){if(!eta||eta.phase!==st.progress.phase)eta={phase:st.progress.phase,t0:Date.now(),done0:st.progress.done};busy('문서화 중… '+progressText(st.progress,eta));}}catch{}await new Promise(r=>setTimeout(r,700));}})();
+  (async()=>{while(watching){try{const st=await (await fetch('/pdf/'+ID+'/status')).json();if(watching&&st.progress){if(!eta||eta.phase!==st.progress.phase)eta={phase:st.progress.phase,t0:Date.now(),done0:st.progress.done};busy('본문 만드는 중… '+progressText(st.progress,eta));}}catch{}await new Promise(r=>setTimeout(r,700));}})();
   try{
     const r=await fetch('/pdf/'+ID+'/content?pages='+pages.join(',')+'&images='+flag(RULES.objectImages)+'&tables='+flag(RULES.tables)+'&blanks='+flag(RULES.blankLines)+'&scan='+flag(RULES.scanTables));const data=await r.json();
     if(!r.ok)throw Error(data.error||'본문을 만들지 못했습니다.');
-    watching=false;btn.textContent='문서화 중…';busy('문서에 넣는 중…');
+    // 이 시점에는 본문 생성만 끝났다. 편집기가 아래 메시지를 받아 실제 삽입을 시작하면
+    // ogolgye:documentize-stage 신호가 돌아와 "문서에 넣는 중"으로 바뀐다.
+    watching=false;btn.textContent='본문 만들기 완료…';busy('본문 만들기 완료…');
     parent.postMessage({type:'ogolgye:documentize',id:ID,text:data.text,html:data.html,pages:data.pages},location.origin);
   }catch(err){btn.disabled=false;btn.textContent='문서화 ▾';busy('');toast(String(err.message||err));}
   finally{clearTimeout(slow);watching=false;}
@@ -637,7 +644,7 @@ pageInput.addEventListener('blur',()=>{pageInput.value=shownPage+1;});
 prevBtn.onclick=()=>goPage(shownPage-1);nextBtn.onclick=()=>goPage(shownPage+1);
 // 쪽 목록: 작은 그림은 목록에서 보이는 것만 불러온다
 thumbsList.innerHTML=Array.from({length:PAGE_COUNT},(_,i)=>{const pg=document.querySelector('.pg[data-n="'+i+'"]'),w=parseFloat(pg.style.getPropertyValue('--w'))||595,h=parseFloat(pg.style.getPropertyValue('--h'))||842;return '<div class="thumb" data-n="'+i+'"><div class="pic" style="aspect-ratio:'+w+'/'+h+'"></div>'+(i+1)+'</div>';}).join('');
-const thumbIo=new IntersectionObserver(es=>es.forEach(e=>{if(!e.isIntersecting)return;const pic=e.target.querySelector('.pic');pic.style.backgroundImage='url(/pdf/'+ID+'/thumb/'+e.target.dataset.n+'.jpg)';thumbIo.unobserve(e.target);}),{root:thumbsList,rootMargin:'400px 0px'});
+const thumbIo=new IntersectionObserver(es=>es.forEach(e=>{const pic=e.target.querySelector('.pic');pic.style.backgroundImage=e.isIntersecting?'url(/pdf/'+ID+'/thumb/'+e.target.dataset.n+'.jpg)':'';}),{root:thumbsList,rootMargin:'400px 0px'});
 thumbsList.querySelectorAll('.thumb').forEach(t=>thumbIo.observe(t));
 thumbsList.onclick=e=>{const t=e.target.closest('.thumb');if(t)goPage(+t.dataset.n);};
 function setThumbs(open){

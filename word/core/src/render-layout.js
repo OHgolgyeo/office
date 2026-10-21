@@ -20,7 +20,22 @@ export function renderTextLayers(input, res, opts = {}) {
     let textLayer = "";
     const tlHtml = (l, pid, join = "") => {
       const g = l.glyphs.find((q) => !/\s/.test(q.c)) || l.glyphs[0];
-      return `<div class="tl" data-pid="${pid}" data-join="${join}" data-w="${(l.x1 - l.x0).toFixed(2)}" style="left:${l.x0}pt;top:${l.oy - l.size * 0.88}pt;font-size:${l.size}pt;font-family:${esc(fontCss(g.font))}">${esc(l.text.replace(/\t/g, " "))}</div>`;
+      const head = `<div class="tl" data-pid="${pid}" data-join="${join}" data-w="${(l.x1 - l.x0).toFixed(2)}" style="left:${l.x0}pt;top:${l.oy - l.size * 0.88}pt;font-size:${l.size}pt;font-family:${esc(fontCss(g.font))}">`;
+      // 낱말마다 원래 자리에 둔다: 줄 전체를 한 번에 늘이면(scaleX) 화면 글꼴과 PDF 글꼴의 글자 폭 차이·양쪽 정렬로 벌어진
+      // 띄어쓰기가 줄 가운데로 갈수록 쌓여, 드래그할 때 마우스와 선택 위치가 어긋났다. 낱말(띄어쓰기로 나뉜 덩이)마다 시작 자리와
+      // 폭을 주면 어긋남이 낱말 하나 안으로 줄어든다. 낱말 수가 글 줄과 맞지 않으면(문장부호 복구로 글이 바뀐 줄 등) 예전처럼 줄 통째로.
+      const words = [];
+      if (l.gaps && l.gaps.length === l.glyphs.length - 1) {
+        let cur = null;
+        l.glyphs.forEach((q, i) => {
+          if (!cur || l.gaps[i - 1]?.isSp) { cur = { x0: q.x0, x1: q.x1 }; words.push(cur); }
+          else cur.x1 = Math.max(cur.x1, q.x1);
+        });
+      }
+      const texts = l.text.split(/[ \t]+/).filter(Boolean);
+      if (words.length < 2 || texts.length !== words.length) return head + esc(l.text.replace(/\t/g, " ")) + "</div>";
+      const inner = words.map((w, k) => `<span class="tw" data-w="${(w.x1 - w.x0).toFixed(2)}" style="left:${(w.x0 - l.x0).toFixed(2)}pt">${esc(texts[k])}</span>`).join(" ");
+      return head + inner + "</div>";
     };
     const groupedLines = new Set();
     res.paragraphs.forEach((p, pid) => {

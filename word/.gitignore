@@ -9,3 +9,6 @@ scripts/
 README.md
 vendor/rhwp-studio/*.d.ts
 vendor/rhwp-studio/manifest.webmanifest
+# 작업 기록·엔진 패치(개발용 — 작업 폴더에만 둔다. 작업 기록에는 개인 파일 경로가 있다)
+docs/
+engine/

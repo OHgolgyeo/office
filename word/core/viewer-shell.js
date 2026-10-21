@@ -118,8 +118,8 @@ body.note-mode .sheet{cursor:crosshair}body.hl-mode .tlayer{cursor:text}.ann-hel
 .figgrab:hover{outline:2px dashed var(--og-accent);outline-offset:-2px;background:color-mix(in srgb,var(--og-accent) 7%,transparent)}
 /* 글자를 드래그하는 동안에는 그림 잡기 영역이 반응하지 않는다(그림 속 글자를 끌다가 글자 없는 곳에 닿으면 그림 선택 표시가 떴다) */
 body.selecting .figgrab{pointer-events:none}
-.tl{position:absolute;white-space:pre;color:transparent;transform-origin:0 0;line-height:1}
-.tl::selection{background:rgba(0,100,255,.25);color:transparent}
+.tl{position:absolute;white-space:pre;color:transparent;transform-origin:0 0;line-height:1}.tl .tw{position:absolute;top:0;white-space:pre;transform-origin:0 0}
+.tl::selection,.tl .tw::selection{background:rgba(0,100,255,.25);color:transparent}
 .loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#999;font-size:14px;z-index:0}
 /* 그림 속 글자: 그림은 원본 그대로, 같은 위치·기울기로 투명한 글자를 겹친다 */
 .gtext{position:absolute;left:0;top:0;transform-origin:0 0;z-index:4}
@@ -611,7 +611,8 @@ document.addEventListener('selectionchange',()=>{
 addEventListener('mouseup',()=>setTimeout(finishGSelect),true);
 addEventListener('blur',finishGSelect);
 // 줄 폭 맞추기(회전·축소와 무관한 배치 폭으로 잰다)
-function fitTextLayer(root){root.querySelectorAll('.tl').forEach(el=>{el.style.transform='';const want=parseFloat(el.dataset.w)*96/72;const got=el.offsetWidth;if(got>0)el.style.transform='scaleX('+(want/got)+')';});}
+// 줄을 낱말로 나눠 둔 줄(.tw)은 낱말마다, 아니면 줄 통째로 원래 폭에 맞춘다
+function fitTextLayer(root){const fitEl=el=>{el.style.transform='';const want=parseFloat(el.dataset.w)*96/72;const got=el.offsetWidth;if(got>0&&want>0)el.style.transform='scaleX('+(want/got)+')';};root.querySelectorAll('.tl').forEach(el=>{const ws=el.querySelectorAll(':scope>.tw');if(ws.length){el.style.transform='';ws.forEach(fitEl);}else fitEl(el);});}
 function fit(){
   const side=B.classList.contains('thumbs-open')?thumbsEl.offsetWidth:0,avail=document.documentElement.clientWidth-side;   // 쪽 목록이 열려 있으면 그 옆 공간에 맞춘다. 세로 스크롤 막대는 뺀 폭(innerWidth 로 재면 막대만큼 넘쳐 가로 스크롤이 생겼다)
   document.documentElement.style.setProperty('--menu-h',document.querySelector('.menu').offsetHeight+'px');

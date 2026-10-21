@@ -890,6 +890,23 @@ function buildPageLines(page) {
     }
     for (let k = rows.length - 1; k >= 0; k--) if (!rows[k].gs.length) rows.splice(k, 1);
   }
+  // 여백의 장식 기호: 장식 글꼴(룬 문자 등)로 찍은 아주 큰 글자 하나가 본문 줄과 기준선이 같아 그 줄 맨 앞(또는 끝)에 붙었다
+  // — 글자 코드는 알파벳이라 "R Chapter 1: …", "L in existing …" 처럼 본문 사이에 엉뚱한 글자가 끼고, 복사·선택도 그 자리까지 늘어났다.
+  // 줄의 다른 글자보다 2배 넘게 크고, 바로 옆 글자와 본문 글자 크기의 1.5배 넘게 떨어져 있고, 글꼴도 다르면 글자가 아니라 장식이다.
+  // (장식 첫 글자 — 문단 첫 글자를 크게 키운 것 — 은 바로 옆 글자에 붙어 있어 여기에 걸리지 않는다)
+  {
+    const med = (a) => { const b = [...a].sort((x, y) => x - y); return b[b.length >> 1]; };
+    const family = (f) => String(f || "").replace(/^[A-Z]{6}\+/, "").split(/[-,]/)[0].toLowerCase();
+    page._ornaments = [];
+    for (const r of rows) {
+      if (r.gs.length < 4) continue;
+      const body = med(r.gs.map((g) => g.size));
+      for (const [g, nb, gap] of [[r.gs[0], r.gs[1], r.gs[1]?.x0 - r.gs[0].x1], [r.gs.at(-1), r.gs.at(-2), r.gs.at(-1).x0 - r.gs.at(-2)?.x1]]) {
+        if (!g || !nb || g.size < body * 2 || !(gap > body * 1.5) || family(g.font) === family(nb.font)) continue;
+        r.gs.splice(r.gs.indexOf(g), 1); page._ornaments.push(g);
+      }
+    }
+  }
   // 위아래로 조금 떠 있는 줄임표·가운뎃점: 글꼴에 따라 "…"가 같은 줄 글자보다 기준선이 몇 pt 높게 찍혀(8.5pt 글에서 3pt)
   // 따로 한 줄이 됐다 — 문단 중간에 "…"만 든 줄이 끼어 줄 잇기가 끊기고 제자리에는 빈칸이 남았다.
   // 그런 글자가 자기 줄에서 이웃 글자 없이 떨어져 있으면(같은 높이의 옆 단 줄에 끼어든 경우도 있다), 기준선이 글자 크기의

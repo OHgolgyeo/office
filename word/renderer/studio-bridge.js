@@ -1011,7 +1011,11 @@ if (!OG_IS_MAIN) {
     for (const body of document.querySelectorAll(".recovery-dialog-body")) {
       const box = body.closest(".modal-overlay") || body.parentElement;
       const later = [...(box?.querySelectorAll("button") || [])].find((b) => b.textContent.trim() === "나중에");
-      if (later) later.click(); else box?.remove();
+      // 창을 그냥 지우면(remove) 편집기 대화상자가 걸어 둔 "키 가로채기"(document 의 keydown 잡기)가 풀리지 않아,
+      // 그 뒤 엔터·백스페이스·방향키가 편집기에 닿지 않고 엔터는 줄바꿈 글자로만 들어간다. 반드시 창 스스로 닫게 한다.
+      const close = box?.querySelector(".dialog-close");
+      if (later) later.click(); else if (close) close.click();
+      else { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); box?.remove(); }
     }
   };
   const ogRecoveryWatch = new MutationObserver(ogDismissRecovery);
@@ -1324,28 +1328,46 @@ async function ogAiRefresh() {
 const OG_API_BODY_HTML = '<label>입력</label><textarea class="og-ai-input" placeholder="문서에서 글을 선택하거나 여기에 직접 입력하세요."></textarea><div class="og-ai-actions"><button type="button" class="primary" data-ai-do="run">실행</button><button type="button" data-ai-do="page">현재 페이지 가져오기</button><button type="button" data-ai-do="selection">선택 내용 가져오기</button></div><div class="og-ai-status"></div><label>실행 결과</label><textarea class="og-ai-output" readonly placeholder="API 실행 결과가 여기에 표시됩니다."></textarea><div class="og-ai-actions"><button type="button" data-ai-do="copy">결과 복사</button><button type="button" data-ai-do="replace">선택한 글 바꾸기</button></div>';
 const OG_GOOGLE_TRANSLATE_BODY_HTML = '<style>.og-translate-tool{display:flex;flex-direction:column;gap:10px}.og-translate-langs{display:grid;grid-template-columns:1fr auto 1fr;gap:8px;align-items:center}.og-translate-langs label{display:flex;flex-direction:column;gap:4px;color:#68736d;font-size:11px}.og-translate-langs select{width:100%;padding:7px;border:1px solid #dce3df;border-radius:7px;background:#fff}.og-translate-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;min-height:230px}.og-translate-pane{display:flex;flex-direction:column;gap:5px;min-width:0}.og-translate-pane b{font-size:12px}.og-translate-pane textarea{height:220px;min-height:220px;max-height:none!important;margin:0;padding:10px;border:1px solid #dce3df;border-radius:8px;resize:none}.og-translate-foot{display:flex;justify-content:space-between;align-items:center;gap:8px}.og-translate-foot .og-ai-status{flex:1}.og-translate-tool button{border:1px solid #ccd2c2;border-radius:6px;background:#fff;padding:6px 9px;cursor:pointer}.og-translate-tool button.primary{color:#fff;background:var(--ai-color);border-color:var(--ai-color)}@media(max-width:620px){.og-translate-grid{grid-template-columns:1fr}.og-translate-pane textarea{height:150px;min-height:150px}}</style><div class="og-translate-tool"><div class="og-translate-langs"><label>원문 언어<select data-api-param="sourceLanguage"><option value="ko">한국어</option><option value="en">영어</option><option value="ja">일본어</option></select></label><button type="button" data-ai-do="swap" title="언어와 내용을 맞바꾸기">⇄</button><label>번역 언어<select data-api-param="targetLanguage"><option value="ko">한국어</option><option value="en" selected>영어</option><option value="ja">일본어</option></select></label></div><div class="og-translate-grid"><div class="og-translate-pane"><b>원문 입력</b><textarea class="og-ai-input" data-api-auto="500" placeholder="번역할 문장을 입력하세요."></textarea></div><div class="og-translate-pane"><b>번역 결과</b><textarea class="og-ai-output" readonly placeholder="번역 결과가 여기에 표시됩니다."></textarea></div></div><div class="og-translate-foot"><div class="og-ai-status">입력을 멈추면 자동으로 번역합니다.</div><button type="button" data-ai-do="clear">지우기</button><button type="button" data-ai-do="copy">복사</button><button type="button" class="primary" data-ai-do="run">번역</button></div></div>';
 const OG_API_DESIGN_EXAMPLE = '<label>입력</label>\n<textarea data-api-input placeholder="내용을 입력하세요"></textarea>\n<div>\n  <button data-api-action="run">실행</button>\n  <button data-api-action="page">현재 페이지</button>\n  <button data-api-action="selection">선택 내용</button>\n</div>\n<p data-api-status></p>\n<label>결과</label>\n<textarea data-api-output readonly></textarea>\n<div>\n  <button data-api-action="copy">복사</button>\n  <button data-api-action="replace">선택한 글 바꾸기</button>\n</div>';
-function ogSafeApiDesign(html) {
+// 직접 만든 API 창 디자인: 위험한 요소를 빼고, 기능이 붙을 자리(입력칸·결과칸·실행 단추)를 확인한다.
+// 예전에는 세 자리 가운데 하나라도 없으면 아무 말 없이 기본 디자인으로 돌아가, 디자인이 왜 안 나오는지 알 수 없었다.
+// <form> 은 통째로 지워 그 안의 입력칸까지 사라졌다 — 이제 form 껍데기만 벗기고 안의 내용은 남긴다.
+function ogParseApiDesign(html) {
   const t = document.createElement("template"); t.innerHTML = String(html || "");
-  t.content.querySelectorAll("script,iframe,object,embed,link,meta,base,form").forEach((x) => x.remove());
+  t.content.querySelectorAll("form").forEach((fm) => fm.replaceWith(...fm.childNodes));
+  t.content.querySelectorAll("script,iframe,object,embed,link,meta,base").forEach((x) => x.remove());
   t.content.querySelectorAll("*").forEach((el) => {
     for (const a of [...el.attributes]) {
       const n = a.name.toLowerCase(), v = a.value.trim().toLowerCase();
-      if (n.startsWith("on") || ((n === "href" || n === "src" || n === "action") && v.startsWith("javascript:"))) el.removeAttribute(a.name);
+      if (n.startsWith("on") || ((n === "href" || n === "src" || n === "action" || n === "formaction") && v.startsWith("javascript:"))) el.removeAttribute(a.name);
     }
   });
   const input = t.content.querySelector("[data-api-input]"), output = t.content.querySelector("[data-api-output]");
-  if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement) || !(output instanceof HTMLInputElement || output instanceof HTMLTextAreaElement) || !t.content.querySelector('[data-api-action="run"]')) return "";
-  input.classList.add("og-ai-input"); output.classList.add("og-ai-output"); output.readOnly = true;
+  const problems = [];
+  if (!input) problems.push("입력칸에 data-api-input 표시가 없습니다(예: <textarea data-api-input>)");
+  else if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement)) problems.push("data-api-input 은 <textarea> 나 <input> 에 붙여야 합니다");
+  if (!output) problems.push("결과칸에 data-api-output 표시가 없습니다(예: <textarea data-api-output>)");
+  if (!t.content.querySelector('[data-api-action="run"]')) problems.push('실행 단추에 data-api-action="run" 표시가 없습니다(예: <button data-api-action="run">)');
+  return { t, input, output, problems };
+}
+function ogApiDesignProblems(html) { return String(html || "").trim() ? ogParseApiDesign(html).problems : []; }
+function ogSafeApiDesign(html) {
+  if (!String(html || "").trim()) return "";
+  const { t, input, output, problems } = ogParseApiDesign(html);
+  if (problems.length) return "";
+  input.classList.add("og-ai-input"); output.classList.add("og-ai-output");
+  if ("readOnly" in output) output.readOnly = true;                       // 결과칸은 <div>·<pre> 같은 일반 요소여도 된다(글자로 채운다)
   let status = t.content.querySelector("[data-api-status]");
   if (!status) { status = document.createElement("p"); status.dataset.apiStatus = ""; t.content.appendChild(status); }
   status.classList.add("og-ai-status");
-  t.content.querySelectorAll("[data-api-action]").forEach((b) => { b.dataset.aiDo = b.dataset.apiAction; if (b.dataset.apiAction === "run") b.classList.add("primary"); });
+  t.content.querySelectorAll("[data-api-action]").forEach((b) => { b.dataset.aiDo = b.dataset.apiAction; if (b instanceof HTMLButtonElement) b.type = "button"; if (b.dataset.apiAction === "run") b.classList.add("primary"); });
   return t.innerHTML;
 }
 function ogApplyApiDesign(panel, tool) {
   const body = panel.querySelector(".og-ai-body"), custom = ogSafeApiDesign(tool?.designHtml);
   body.innerHTML = custom || (tool?.provider === "google_cloud" ? OG_GOOGLE_TRANSLATE_BODY_HTML : OG_API_BODY_HTML);
   body.classList.toggle("custom", !!custom || tool?.provider === "google_cloud");
+  // 직접 만든 디자인을 쓰지 못했으면 그 이유를 창의 상태 줄에 보여 준다(ogOpenAiTool)
+  panel.__ogDesignProblems = custom ? [] : ogApiDesignProblems(tool?.designHtml);
 }
 const ogApiGet = (el) => el && "value" in el ? el.value : (el?.textContent || "");
 const ogApiSet = (el, value) => { if (!el) return; if ("value" in el) el.value = value; else el.textContent = value; };
@@ -1414,7 +1436,7 @@ function ogOpenAiTool(tool, preview = false) {
   panel.dataset.tool = tool.id; panel.style.setProperty("--ai-color", tool.color); panel.querySelector(".og-ai-title").textContent = tool.name; panel.querySelector(".og-ai-title-icon").textContent = tool.icon;
   panel.className = `og-ai-panel ${tool.view === "side" ? `side ${tool.side}` : "float"}`; panel.style.left = panel.style.right = panel.style.top = "";
   const source = preview ? { text: "안녕하세요. 만나서 반갑습니다.", segments: [], kind: "preview" } : selected?.text ? selected : ogPageSource(); ogApiSet(input, source.text); input.__ogSource = source; panel.__ogSource = source;
-  ogApiSet(panel.querySelector(".og-ai-output"), preview ? "Hello. Nice to meet you." : ""); const status = panel.querySelector(".og-ai-status"); if (status) status.textContent = preview ? "디자인 미리보기 · API는 호출하지 않았습니다." : selected?.text ? "선택한 글을 가져왔습니다." : "현재 페이지의 글을 가져왔습니다."; panel.hidden = false;
+  ogApiSet(panel.querySelector(".og-ai-output"), preview ? "Hello. Nice to meet you." : ""); const status = panel.querySelector(".og-ai-status"); if (status) status.textContent = panel.__ogDesignProblems?.length ? "직접 만든 디자인을 쓰지 못해 기본 디자인으로 열었습니다: " + panel.__ogDesignProblems.join(" / ") : preview ? "디자인 미리보기 · API는 호출하지 않았습니다." : selected?.text ? "선택한 글을 가져왔습니다." : "현재 페이지의 글을 가져왔습니다."; panel.hidden = false;
 }
 // ── 칸 바탕색(서식 줄의 단추) ────────────────────────────────────
 // 편집기에는 "표 > 셀 테두리/배경" 창이 있지만 메뉴 안쪽에 있어 찾기 어렵다(칸 색을 바꾸는 기능이 없는 줄 알았다).
@@ -2424,13 +2446,16 @@ ogOptionTab("og-ai", "API 도구",
     field("view").addEventListener("change", () => { field("side").disabled = field("view").value !== "side"; });
     panel.querySelector("[data-ai-design-example]").onclick = () => { field("designHtml").value = OG_API_DESIGN_EXAMPLE; status.textContent = "기본 동작이 연결된 HTML 예시를 넣었습니다. 원하는 모양으로 수정한 뒤 저장하세요."; };
     const readTool = () => { const tool = { id: current || "preview" }; for (const n of ["name", "icon", "color", "provider", "endpoint", "model", "apiKey", "prompt", "requestJson", "resultPath", "authHeader", "authPrefix", "designHtml", "view", "side"]) tool[n] = field(n).value; return tool; };
-    panel.querySelector("[data-ai-preview]").onclick = () => { const tool = readTool(); tool.name ||= "API 미리보기"; tool.icon ||= "API"; ogOpenAiTool(tool, true); status.textContent = "현재 입력값으로 창 미리보기를 열었습니다. 실제 API는 호출하지 않았습니다."; };
+    panel.querySelector("[data-ai-preview]").onclick = () => { const tool = readTool(); tool.name ||= "API 미리보기"; tool.icon ||= "API"; ogOpenAiTool(tool, true); const bad = ogApiDesignProblems(tool.designHtml); status.style.color = bad.length ? "#b3261e" : ""; status.textContent = bad.length ? "창 디자인 HTML 을 쓰지 못해 기본 디자인으로 보였습니다 — " + bad.join(" / ") : "현재 입력값으로 창 미리보기를 열었습니다. 실제 API는 호출하지 않았습니다."; };
     panel.querySelector("[data-ai-save]").onclick = async () => {
       const tool = readTool(); if (!current) delete tool.id;
       status.style.color = ""; status.textContent = "안전하게 저장하고 있습니다…";
       const r = await ogAi("save", { tool });
       if (!r.ok) { status.style.color = "#b3261e"; status.textContent = r.error; return; }
-      ogAiTools = r.tools; current = current || r.tools[r.tools.length - 1]?.id; ogRenderAiButtons(); draw(); status.textContent = "저장했습니다. 문단 정렬 기능 오른쪽에서 사용할 수 있습니다.";
+      ogAiTools = r.tools; current = current || r.tools[r.tools.length - 1]?.id; ogRenderAiButtons(); draw();
+      const bad = ogApiDesignProblems(tool.designHtml);
+      if (bad.length) { status.style.color = "#b3261e"; status.textContent = "저장했지만 창 디자인 HTML 은 쓰이지 않습니다(기본 디자인으로 열립니다) — " + bad.join(" / "); }
+      else status.textContent = "저장했습니다. 문단 정렬 기능 오른쪽에서 사용할 수 있습니다.";
     };
     return load;
   });

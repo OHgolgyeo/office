@@ -1362,9 +1362,28 @@ function ogSafeApiDesign(html) {
   t.content.querySelectorAll("[data-api-action]").forEach((b) => { b.dataset.aiDo = b.dataset.apiAction; if (b instanceof HTMLButtonElement) b.type = "button"; if (b.dataset.apiAction === "run") b.classList.add("primary"); });
   return t.innerHTML;
 }
+// 직접 만든 디자인은 그림자 DOM(Shadow DOM) 안에 넣는다. 예전에는 창 안에 그대로 넣어, 디자인의 <style> 이 편집 화면 전체에
+// 적용됐다(body·button·* 같은 규칙이 편집 화면과 API 창 머리까지 바꿔 닫기(×) 단추가 가려지거나 눌리지 않았다). 거꾸로 디자인 안의
+// 요소에는 편집 화면의 스타일이 섞여 디자인대로 보이지 않았다. 그림자 DOM 안에서는 서로 영향을 주지 않는다.
+// 디자인의 html·body·:root 규칙은 디자인 상자(:host)에 걸리도록 바꾼다(한 장짜리 웹 페이지로 만든 디자인도 그대로 보이게).
+// contain·transform: 디자인 안의 position:fixed 요소(화면 전체 덮개 등)가 창 밖으로 나가 API 창 머리·닫기(×)를 덮지 못하게 디자인 상자 안에 가둔다
+const OG_API_DESIGN_BASE_CSS = ":host{display:block;flex:none;position:relative;contain:layout paint;transform:translateZ(0);isolation:isolate}" +
+  "[data-api-input],[data-api-output]{box-sizing:border-box;max-width:100%}";
+function ogScopeDesignCss(css) {
+  return String(css).replace(/(^|[\s,{}>~+(])(html|body|:root)(?=[\s,{.#:\[>~+)]|$)/g, "$1:host");
+}
+function ogAiRoot(panel) { return panel.querySelector(".og-ai-design")?.shadowRoot || null; }
+const ogAiQ = (panel, sel) => ogAiRoot(panel)?.querySelector(sel) || panel.querySelector(sel);
+const ogAiQA = (panel, sel) => [...(ogAiRoot(panel)?.querySelectorAll(sel) || []), ...panel.querySelectorAll(sel)];
 function ogApplyApiDesign(panel, tool) {
   const body = panel.querySelector(".og-ai-body"), custom = ogSafeApiDesign(tool?.designHtml);
-  body.innerHTML = custom || (tool?.provider === "google_cloud" ? OG_GOOGLE_TRANSLATE_BODY_HTML : OG_API_BODY_HTML);
+  if (custom) {
+    body.replaceChildren();
+    const host = document.createElement("div"); host.className = "og-ai-design"; body.appendChild(host);
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = "<style>" + OG_API_DESIGN_BASE_CSS + "</style>" + custom;
+    root.querySelectorAll("style").forEach((st) => { st.textContent = ogScopeDesignCss(st.textContent); });
+  } else body.innerHTML = tool?.provider === "google_cloud" ? OG_GOOGLE_TRANSLATE_BODY_HTML : OG_API_BODY_HTML;
   body.classList.toggle("custom", !!custom || tool?.provider === "google_cloud");
   // 직접 만든 디자인을 쓰지 못했으면 그 이유를 창의 상태 줄에 보여 준다(ogOpenAiTool)
   panel.__ogDesignProblems = custom ? [] : ogApiDesignProblems(tool?.designHtml);
@@ -1379,14 +1398,15 @@ function ogAiPanel() {
   for (const ev of ["pointerdown", "pointerup", "mousedown", "mouseup", "dblclick", "keydown"]) panel.addEventListener(ev, (e) => e.stopPropagation());
   panel.querySelector(".og-ai-close").onclick = () => { panel.hidden = true; };
   panel.addEventListener("click", async (e) => {
-    const act = e.target.closest("[data-ai-do]")?.dataset.aiDo; if (!act) return;
-    const input = panel.querySelector(".og-ai-input"), output = panel.querySelector(".og-ai-output"), status = panel.querySelector(".og-ai-status");
+    // 그림자 DOM 안에서 누른 것은 e.target 이 디자인 상자로 바뀌어 보이므로, 실제로 누른 요소까지의 경로에서 찾는다
+    const hit = e.composedPath().find((n) => n.dataset?.aiDo); const act = hit?.dataset.aiDo; if (!act) return;
+    const input = ogAiQ(panel, ".og-ai-input"), output = ogAiQ(panel, ".og-ai-output"), status = ogAiQ(panel, ".og-ai-status");
     if (act === "page") { const s = ogPageSource(); ogApiSet(input, s.text); input.__ogSource = s; panel.__ogSource = s; return; }
     if (act === "selection") { const s = ogSelectionSource(); if (!s?.text) { status.textContent = "문서에서 글을 먼저 선택해 주세요."; return; } ogApiSet(input, s.text); input.__ogSource = s; panel.__ogSource = s; return; }
     if (act === "copy") { if (ogApiGet(output)) { await navigator.clipboard.writeText(ogApiGet(output)); status.textContent = "결과를 복사했습니다."; } return; }
     if (act === "clear") { ogApiSet(input, ""); ogApiSet(output, ""); status.textContent = "준비됨"; input.focus(); return; }
     if (act === "swap") {
-      const source = panel.querySelector('[data-api-param="sourceLanguage"]'), target = panel.querySelector('[data-api-param="targetLanguage"]');
+      const source = ogAiQ(panel, '[data-api-param="sourceLanguage"]'), target = ogAiQ(panel, '[data-api-param="targetLanguage"]');
       if (source && target) [source.value, target.value] = [target.value, source.value];
       if (ogApiGet(output)) { const oldInput = ogApiGet(input); ogApiSet(input, ogApiGet(output)); ogApiSet(output, oldInput); }
       return;
@@ -1394,19 +1414,20 @@ function ogAiPanel() {
     if (act === "replace") { ogAiReplaceSelection(panel); return; }
     if (act === "run") {
       if (!ogApiGet(input).trim()) { status.textContent = "API에 보낼 내용을 넣어 주세요."; return; }
-      e.target.disabled = true; status.textContent = "API를 실행하고 있습니다…"; ogApiSet(output, "");
-      const options = {}; panel.querySelectorAll("[data-api-param]").forEach((x) => { options[x.dataset.apiParam] = "value" in x ? x.value : x.textContent; });
+      hit.disabled = true; status.textContent = "API를 실행하고 있습니다…"; ogApiSet(output, "");
+      const options = {}; ogAiQA(panel, "[data-api-param]").forEach((x) => { options[x.dataset.apiParam] = "value" in x ? x.value : x.textContent; });
       const r = await ogAi("run", { id: panel.dataset.tool, input: ogApiGet(input), options });
-      e.target.disabled = false;
+      hit.disabled = false;
       if (!r.ok) { status.textContent = "실행하지 못했습니다: " + (r.error || "알 수 없는 오류"); return; }
       ogApiSet(output, r.output || ""); status.textContent = "완료했습니다.";
     }
   });
   panel.addEventListener("input", (e) => {
-    if (!e.target.matches?.(".og-ai-input")) return;
-    if (e.target.__ogSource?.text !== ogApiGet(e.target)) { e.target.__ogSource = null; panel.__ogSource = null; }
-    const delay = Number(e.target.dataset.apiAuto); if (!Number.isFinite(delay) || delay < 0) return;
-    clearTimeout(panel.__ogAutoTimer); panel.__ogAutoTimer = setTimeout(() => { if (ogApiGet(e.target).trim()) panel.querySelector('[data-ai-do="run"]')?.click(); }, Math.min(5000, delay));
+    const el = e.composedPath()[0];
+    if (!el?.matches?.(".og-ai-input")) return;
+    if (el.__ogSource?.text !== ogApiGet(el)) { el.__ogSource = null; panel.__ogSource = null; }
+    const delay = Number(el.dataset.apiAuto); if (!Number.isFinite(delay) || delay < 0) return;
+    clearTimeout(panel.__ogAutoTimer); panel.__ogAutoTimer = setTimeout(() => { if (ogApiGet(el).trim()) ogAiQ(panel, '[data-ai-do="run"]')?.click(); }, Math.min(5000, delay));
   });
   const head = panel.querySelector(".og-ai-head"); let drag = null;
   head.addEventListener("mousedown", (e) => { if (!panel.classList.contains("float") || e.target.closest("button")) return; const r = panel.getBoundingClientRect(); drag = { x: e.clientX - r.left, y: e.clientY - r.top }; e.preventDefault(); });
@@ -1415,7 +1436,7 @@ function ogAiPanel() {
   return panel;
 }
 function ogAiReplaceSelection(panel) {
-  const output = panel.querySelector(".og-ai-output"), status = panel.querySelector(".og-ai-status"), source = panel.__ogSource;
+  const output = ogAiQ(panel, ".og-ai-output"), status = ogAiQ(panel, ".og-ai-status"), source = panel.__ogSource;
   if (!ogApiGet(output) || source?.kind !== "selection" || !source.segments?.length) { status.textContent = "본문에서 선택한 글로 실행한 경우에만 문서를 바로 바꿀 수 있습니다."; return; }
   const first = source.segments[0], last = source.segments[source.segments.length - 1], ih = window.__ogolgyeStudio?.inputHandler;
   if (!ih || first.sectionIndex !== last.sectionIndex) { status.textContent = "이 선택 영역은 바로 바꿀 수 없습니다."; return; }
@@ -1432,11 +1453,11 @@ function ogAiReplaceSelection(panel) {
 }
 function ogOpenAiTool(tool, preview = false) {
   const panel = ogAiPanel(); ogApplyApiDesign(panel, tool);
-  const input = panel.querySelector(".og-ai-input"), selected = ogSelectionSource();
+  const input = ogAiQ(panel, ".og-ai-input"), selected = ogSelectionSource();
   panel.dataset.tool = tool.id; panel.style.setProperty("--ai-color", tool.color); panel.querySelector(".og-ai-title").textContent = tool.name; panel.querySelector(".og-ai-title-icon").textContent = tool.icon;
   panel.className = `og-ai-panel ${tool.view === "side" ? `side ${tool.side}` : "float"}`; panel.style.left = panel.style.right = panel.style.top = "";
   const source = preview ? { text: "안녕하세요. 만나서 반갑습니다.", segments: [], kind: "preview" } : selected?.text ? selected : ogPageSource(); ogApiSet(input, source.text); input.__ogSource = source; panel.__ogSource = source;
-  ogApiSet(panel.querySelector(".og-ai-output"), preview ? "Hello. Nice to meet you." : ""); const status = panel.querySelector(".og-ai-status"); if (status) status.textContent = panel.__ogDesignProblems?.length ? "직접 만든 디자인을 쓰지 못해 기본 디자인으로 열었습니다: " + panel.__ogDesignProblems.join(" / ") : preview ? "디자인 미리보기 · API는 호출하지 않았습니다." : selected?.text ? "선택한 글을 가져왔습니다." : "현재 페이지의 글을 가져왔습니다."; panel.hidden = false;
+  ogApiSet(ogAiQ(panel, ".og-ai-output"), preview ? "Hello. Nice to meet you." : ""); const status = ogAiQ(panel, ".og-ai-status"); if (status) status.textContent = panel.__ogDesignProblems?.length ? "직접 만든 디자인을 쓰지 못해 기본 디자인으로 열었습니다: " + panel.__ogDesignProblems.join(" / ") : preview ? "디자인 미리보기 · API는 호출하지 않았습니다." : selected?.text ? "선택한 글을 가져왔습니다." : "현재 페이지의 글을 가져왔습니다."; panel.hidden = false;
 }
 // ── 칸 바탕색(서식 줄의 단추) ────────────────────────────────────
 // 편집기에는 "표 > 셀 테두리/배경" 창이 있지만 메뉴 안쪽에 있어 찾기 어렵다(칸 색을 바꾸는 기능이 없는 줄 알았다).

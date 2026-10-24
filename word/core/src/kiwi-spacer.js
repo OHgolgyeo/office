@@ -22,8 +22,28 @@ export function findModelDir(dir = DEFAULT_MODEL_DIR) {
   return null;
 }
 
+// Kiwi 답 기억(파일별): 문단 복원이 Kiwi 에 묻는 것은 boundary(앞말, 뒷말)·glue(앞말, 뒷말)뿐이고 같은 글이면 답도 같다.
+// 한 번 연 PDF 의 답을 { b: {키: 답}, g: {키: 답} } 로 남겨 두면, 다시 열 때 Kiwi(불러오는 동안 램 약 1GB)를 올리지 않아도 된다.
+const memoKey = (left, right) => left + "\u0000" + right;
+export class KiwiMemoMiss extends Error {}
+/** 기억에만 묻는 spacer. 기억에 없는 물음이 나오면 KiwiMemoMiss — 그때는 Kiwi 를 불러와 처음부터 다시 한다. */
+export function memoOnlySpacer(memo) {
+  const get = (m, l, r) => { const k = memoKey(l, r); if (!Object.hasOwn(m, k)) throw new KiwiMemoMiss(k); return m[k]; };
+  return { name: "Kiwi(기억)", boundary: (l, r) => get(memo.b, l, r), glue: (l, r) => get(memo.g, l, r) };
+}
+/** 실제 Kiwi 의 답을 memo 에 적어 가며 돌려주는 spacer */
+export function recordingSpacer(sp, memo) {
+  return {
+    name: sp.name,
+    boundary: (l, r) => (memo.b[memoKey(l, r)] = sp.boundary(l, r)),
+    glue: (l, r) => (memo.g[memoKey(l, r)] = sp.glue(l, r)),
+  };
+}
+
 /** @returns {Promise<Spacer|null>} 모델이 없으면 null */
-export async function createKiwiSpacer(modelDir) {
+// loadMultiDict: false — 위키데이터 고유명사 사전(multi.dict)은 빼고 불러온다. 약 155MB 를 아끼고 불러오기도 1초쯤 빨라진다.
+// 사용자 문서 셋·테스트1(약 8,900줄)에서 줄 이음 판단이 한 줄도 달라지지 않았다(2026-10-23).
+export async function createKiwiSpacer(modelDir, buildOptions = { loadMultiDict: false }) {
   const dir = findModelDir(modelDir);
   if (!dir) return null;
   const files = {};
@@ -39,7 +59,7 @@ export async function createKiwiSpacer(modelDir) {
   let builder, kiwi;
   try {
     builder = await KiwiBuilder.create(wasm);
-    kiwi = await builder.build({ modelFiles: files });
+    kiwi = await builder.build({ modelFiles: files, ...buildOptions });
   } finally { Object.assign(console, saved); }
   kiwi.setGlobalConfig({ spaceTolerance: 0 });
 

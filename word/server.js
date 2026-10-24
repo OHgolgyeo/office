@@ -7,7 +7,9 @@ import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import os from "os";
 import crypto from "crypto";
-import { Worker } from "worker_threads";
+import { createSessionClient } from "./core/session-client.js";
+import { PageImages } from "./core/page-images.js";
+import { PADDLE_MODELS, PADDLE_PACKS, installPaddlePacks, paddleModelPath, paddlePackState, paddlePacksForLanguages } from "./core/paddle-models.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -22,79 +24,49 @@ const STATIC = {
   "/studio/": path.join(__dirname, "vendor", "rhwp-studio"),
   "/vendor/rhwp-editor/": path.dirname(require.resolve("@rhwp/editor")),
   "/vendor/phosphor/": path.join(path.dirname(require.resolve("@phosphor-icons/web/regular")), ".."),
+  "/paddle-sdk/": path.join(__dirname, "vendor", "paddleocr"),
+  "/paddle-ort/": path.join(__dirname, "vendor", "paddleocr", "ort"),
 };
 
-// PDF: 연 문서마다 세션을 두고, 무거운 일은 필요할 때 조금씩(core/session.js)
-let modsP = null, spacerP = null;
-const mods = () => (modsP ||= Promise.all([import("./core/session.js"), import("./core/viewer-shell.js"), import("./core/src/kiwi-spacer.js")])
-  .then(([se, sh, kw]) => ({ PdfSession: se.PdfSession, buildShellHtml: sh.buildShellHtml, createKiwiSpacer: kw.createKiwiSpacer })));
-const spacer = () => (spacerP ||= mods().then((m) => m.createKiwiSpacer(path.join(__dirname, "models", "kiwi")))
-  .catch((e) => { console.warn("[Kiwi] 불러오지 못해 띄어쓰기 판단에 Kiwi 를 쓰지 않습니다:", e?.message || e); return null; }));
-// PDF 준비(글자 추출·문단 복원·글자 층)는 작업 스레드(core/prepare-worker.mjs)에서: 서버가 그동안에도 쪽 그림 요청에 답한다.
-// 작업 스레드를 못 띄우면 null(세션이 서버에서 직접 한다 — 그때만 이 스레드에서 Kiwi 를 불러온다).
-let prepW = null, prepSeq = 0, prepIdleTimer = 0;
-const prepJobs = new Map();
-// Kiwi(문단 띄어쓰기 판단)는 작업 스레드 안에서 약 900MB 를 차지하고(WebAssembly 메모리라 한 번 늘면 줄지 않는다),
-// PDF 를 준비할 때(글자 추출 뒤 문단 복원)만 쓴다 → 준비가 끝나고 이만큼 아무 PDF 도 준비하지 않으면 작업 스레드를 끝내
-// 메모리를 돌려받는다. 다음 PDF 는 새 작업 스레드가 Kiwi 를 다시 불러온다(뒤에서 약 2~3초 더).
-const PREP_IDLE_MS = +process.env.OG_PREP_IDLE_MS || 5 * 1000;
-function schedulePrepRelease() {
-  clearTimeout(prepIdleTimer);
-  prepIdleTimer = setTimeout(() => {
-    if (prepJobs.size || !prepW) return;
-    const w = prepW; prepW = null;
-    w.terminate().catch(() => {});
-  }, PREP_IDLE_MS);
-  prepIdleTimer.unref?.();
-}
-function prepareWorker() {
-  if (prepW !== null) return prepW;
-  try {
-    const w = new Worker(new URL("./core/prepare-worker.mjs", import.meta.url), { workerData: { kiwiDir: path.join(__dirname, "models", "kiwi") } });
-    w.on("message", (m) => {
-      const job = prepJobs.get(m.id); if (!job) return;
-      if (m.progress) job.onProgress(m.progress[0], m.progress[1]);
-      else if (m.phase) job.onPhase(m.phase);
-      else { prepJobs.delete(m.id); if (m.error) job.reject(new Error(m.error)); else job.resolve(m.result); if (!prepJobs.size) schedulePrepRelease(); }
-    });
-    const fail = (e) => { for (const j of prepJobs.values()) j.reject(e instanceof Error ? e : new Error(String(e))); prepJobs.clear(); if (prepW === w) prepW = null; };
-    w.on("error", fail);
-    w.on("exit", (code) => fail(new Error(`PDF 준비 작업 스레드가 끝났습니다(${code}).`)));
-    w.unref();
-    prepW = w;
-  } catch (e) { console.warn("[PDF 준비] 작업 스레드를 띄우지 못했습니다:", e?.message || e); prepW = false; }
-  return prepW;
-}
-function prepareInWorker(bytes, onProgress, onPhase) {
-  const w = prepareWorker();
-  if (!w) return Promise.reject(new Error("작업 스레드 없음"));
-  clearTimeout(prepIdleTimer);
-  return new Promise((resolve, reject) => {
-    const id = ++prepSeq;
-    prepJobs.set(id, { resolve, reject, onProgress, onPhase });
-    w.postMessage({ id, bytes }, [bytes.buffer]);
-  });
-}
+// PDF: 연 문서마다 세션을 두고, 무거운 일은 필요할 때 조금씩(core/session.js). 세션은 앱 본체 밖 작업 스레드
+// (core/session-host.mjs)에 두고 여기서는 요청을 넘기기만 한다 — 문단 복원 결과 받기(150쪽 약 31MB, 0.5~1.6초)·글자 층·
+// 문서화 결과 만들기를 본체에서 하면 그동안 앱 전체가 멈췄다. 쪽 그림은 본체의 내장 JPEG 변환을 쓰려고 여기서(core/page-images.js).
+let modsP = null;
+const mods = () => (modsP ||= import("./core/viewer-shell.js").then((sh) => ({ buildShellHtml: sh.buildShellHtml })));
+let paddleOcrProvider = null;
+const sessions = new Map();     // id → { id, name, annotationKey, pageSizes, images }
+let seq = 0;
+let hotSessionId = null;
+const host = createSessionClient({
+  kiwiDir: path.join(__dirname, "models", "kiwi"),
+  onMainCall: (op, args) => {
+    if (op === "paddle" && paddleOcrProvider) return paddleOcrProvider({ ...args, png: Buffer.from(args.png) });
+    return Promise.reject(new Error("PaddleOCR 을 쓸 수 없습니다."));
+  },
+  // 세션 작업 스레드가 죽으면 그 안의 PDF 는 모두 닫힌 것: 보기 화면은 "닫힌 문서"를 받고 사용자가 다시 연다
+  onLost: () => { for (const s of sessions.values()) s.images.close(); sessions.clear(); hotSessionId = null; },
+});
 /** 앱을 끌 때: 뒤에서 도는 계산(모델 프로세스·문서화 준비 작업 스레드·OCR)을 기다리지 않고 바로 정리한다.
  *  예전에는 레이아웃 분석이 도는 중에 끄면 계산 중인 쪽이 끝날 때까지(쪽당 최대 4초) 종료가 늦었다. */
 export async function shutdown() {
-  clearTimeout(prepIdleTimer);
-  for (const s of sessions.values()) s.close();
+  for (const s of sessions.values()) s.images.close();
   sessions.clear(); hotSessionId = null;
-  try { if (prepW) await prepW.terminate(); } catch { /* 이미 끝남 */ }
-  prepW = null;
-  try { (await import("./core/ppstructure.js")).shutdownModels(); } catch { /* 모델을 안 씀 */ }
-  try { (await import("./core/ocr.js")).shutdownOcr(); } catch { /* OCR 을 안 씀 */ }
+  try { await host.call("shutdown"); } catch { /* 이미 끝남 */ }
+  await host.stop();
 }
-// 앱을 켤 때: 작업 스레드만 띄워 둔다. Kiwi 는 PDF 를 처음 준비할 때 불러온다 — 예전에는 켜자마자 불러
-// PDF 를 한 번도 열지 않아도 메인 프로세스가 약 1GB 였다.
-export const warmUp = () => { prepareWorker(); };
-// 사용자가 파일을 고르기 시작하면(서브뷰 "내 컴퓨터에서 열기"·드라이브 창) 고르는 동안 Kiwi 를 미리 불러온다 — 쓰지 않으면 똑같이 내려놓는다
-function warmKiwi() { const w = prepareWorker(); if (!w) return; w.postMessage({ warm: true }); if (!prepJobs.size) schedulePrepRelease(); }
-
-const sessions = new Map();     // id → PdfSession
-let seq = 0;
-let hotSessionId = null;
+// 앱을 켤 때: 작업 스레드만 띄워 둔다. Kiwi 는 PDF 를 처음 준비할 때 불러온다
+export const warmUp = () => { host.call("warmUp").catch(() => {}); };
+// 사용자가 파일을 고르기 시작하면 고르는 동안 Kiwi 를 미리 불러온다 — 쓰지 않으면 똑같이 내려놓는다
+function warmKiwi() { host.call("warmKiwi").catch(() => {}); }
+const ocrConfig = (languages = loadSettings().ocrLanguages) => {
+  const paddle = paddlePackState(PADDLE_OCR_DIR, languages);
+  return { languages, paddleEnabled: !!paddleOcrProvider, paddleDir: PADDLE_OCR_DIR, paddlePacks: paddle.ready ? paddle.packs : [], paddleDetector: paddle.detector };
+};
+/** Electron의 숨은 브라우저 OCR 실행기를 연결한다. 일반 브라우저 시험 모드에서는 Tesseract로 돌아간다. */
+export function setPaddleOcrProvider(provider) {
+  paddleOcrProvider = typeof provider === "function" ? provider : null;
+  if (sessions.size) host.call("setOcrConfig", { cfg: ocrConfig() }).catch(() => {});
+}
 function activeSession(id) {
   const s = sessions.get(id);
   if (s) { sessions.delete(id); sessions.set(id, s); } // 최근 사용한 문서를 뒤로 보내 LRU 순서를 유지한다.
@@ -103,26 +75,30 @@ function activeSession(id) {
 function activatePdfView(id) {
   if (hotSessionId === id) return;
   hotSessionId = id;
-  for (const [otherId, other] of sessions) if (otherId !== id) other.trimViewCaches?.();
+  for (const [otherId, other] of sessions) if (otherId !== id) { other.images.trim(); host.call("trimViewCaches", { sid: otherId }).catch(() => {}); }
 }
 async function openPdf(bytes, name) {
-  const m = await mods();
-  const s = await new m.PdfSession(bytes, name).open();
+  const t0 = Date.now();
   const id = String(++seq);
-  s.id = id;
-  s.annotationKey = crypto.createHash("sha256").update(bytes).digest("hex");
-  s.ocrLangDir = OCR_DIR;
-  s.ppDir = PP_DIR;
-  // AI 레이아웃 결과 저장 자리(파일 해시 + 모델 버전): 같은 PDF 를 다시 열면 모델을 다시 돌리지 않는다
-  s.layoutStore = path.join(path.dirname(SETTINGS_FILE), "layout-cache", s.annotationKey + "-" + PP_LAYOUT_TAG + ".json");
-  s.ocrLanguages = loadSettings().ocrLanguages;
-  s.autoLayout = !!loadSettings().pdfRules?.scanTables;
-  sessions.set(id, s);
-  // 글자층·줄바꿈 복원만 뒤에서 준비한다. 무거운 ONNX 레이아웃 분석은 PDF를 보는 것만으로 시작하지 않고,
-  // 사용자가 문서화에서 "스캔 표 인식"을 실제로 선택했을 때 고른 페이지만 실행한다.
-  s.prepareConversion(spacer, prepareInWorker);                    // spacer: 작업 스레드를 못 쓸 때만 여기서 불러온다
-  return { id, name, pages: s.pageSizes.length, ms: Date.now() - s.state.t0 };
+  const annotationKey = crypto.createHash("sha256").update(bytes).digest("hex");
+  const settings = loadSettings(), oc = ocrConfig(settings.ocrLanguages);
+  const cfg = {
+    annotationKey, ocrLangDir: OCR_DIR, ocrLanguages: settings.ocrLanguages, paddlePacks: oc.paddlePacks, paddleDetector: oc.paddleDetector,
+    ppDir: PP_DIR,
+    // AI 레이아웃 결과 저장 자리(파일 해시 + 모델 버전): 같은 PDF 를 다시 열면 모델을 다시 돌리지 않는다
+    layoutStore: path.join(path.dirname(SETTINGS_FILE), "layout-cache", annotationKey + "-" + PP_LAYOUT_TAG + ".json"),
+    // Kiwi 답 기억(파일 해시별, prepare-worker.mjs withKiwi): 같은 PDF 를 다시 열 때 Kiwi 를 불러오지 않는다
+    kiwiCache: path.join(path.dirname(SETTINGS_FILE), "kiwi-cache", annotationKey + ".json"),
+    autoLayout: !!settings.pdfRules?.scanTables,
+  };
+  await host.call("setPaddle", { enabled: !!paddleOcrProvider, dir: PADDLE_OCR_DIR });
+  const copy = new Uint8Array(bytes);                                // 원본은 쪽 그림 작업 스레드가 한 부 더 연다
+  const opened = await host.call("open", { sid: id, bytes: copy, name, cfg }, [copy.buffer]);
+  const images = new PageImages(bytes, opened.pages, (kind, n, scale) => host.call(kind === "thumb" ? "pageThumb" : "pageImage", { sid: id, n, scale }));
+  sessions.set(id, { id, name, annotationKey, pageSizes: opened.pages, images });
+  return { id, name, pages: opened.pages.length, ms: Date.now() - t0 };
 }
+function closePdf(s) { s.images.close(); sessions.delete(s.id); if (hotSessionId === s.id) hotSessionId = null; return host.call("close", { sid: s.id }); }
 
 // 사용자 자료(설정·PDF 주석·OCR 언어): 홈 폴더의 .ogolgye-word. 프로그램 폴더 밖이라 업데이트해도 남는다.
 // (시험할 때는 OGOLGYE_SETTINGS 로 다른 곳을 쓸 수 있다)
@@ -130,9 +106,12 @@ const SETTINGS_FILE = process.env.OGOLGYE_SETTINGS || path.join(os.homedir(), ".
 const PDF_ANNOTATIONS_DIR = () => path.join(path.dirname(SETTINGS_FILE), "pdf-annotations");
 // pdfRules: PDF 문서화의 "규칙 적용" — 오브젝트 그림(objectImages)·표 모양 유지(tables)·문단 사이 빈 줄 살리기(blankLines)
 //   ·스캔본 표 인식(scanTables, 모델을 내려받아야 해서 처음에는 끔)
-const DEFAULT_PDF_RULES = { objectImages: true, tables: true, blankLines: true, scanTables: false };
+const DEFAULT_PDF_RULES = { objectImages: true, tables: true, blankLines: true, scanTables: false, rubyMode: "position" };
 const DEFAULT_SETTINGS = { accent: "#6b7b3a", subviewPosition: "right", ruler: false, ocrLanguages: ["kor", "eng"], pdfRules: DEFAULT_PDF_RULES };
-const cleanPdfRules = (v) => Object.fromEntries(Object.entries(DEFAULT_PDF_RULES).map(([k, d]) => [k, typeof v?.[k] === "boolean" ? v[k] : d]));
+const cleanPdfRules = (v) => ({
+  ...Object.fromEntries(Object.entries(DEFAULT_PDF_RULES).filter(([, d]) => typeof d === "boolean").map(([k, d]) => [k, typeof v?.[k] === "boolean" ? v[k] : d])),
+  rubyMode: ["position", "parentheses"].includes(v?.rubyMode) ? v.rubyMode : DEFAULT_PDF_RULES.rubyMode,
+});
 function loadSettings() {
   try {
     const next = { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")) };
@@ -157,6 +136,8 @@ function saveSettings(patch) {
 // 언어 자료는 사용자 자료 폴더에 둔다(프로그램 폴더는 업데이트할 때 통째로 바뀌어 새로 받은 언어가 사라진다).
 // 프로그램에 들어 있는 기본 언어(한국어·영어)는 처음 한 번 복사해 온다.
 const OCR_DIR = path.join(path.dirname(SETTINGS_FILE), "ocr");
+// PaddleOCR 모델은 언어군별 선택 설치. 설치 파일에는 넣지 않고 사용자 자료 폴더에 둔다.
+const PADDLE_OCR_DIR = path.join(path.dirname(SETTINGS_FILE), "models", "paddle-ocr");
 // 스캔본 표 인식 모델(PP-Structure, 약 131MB): 켤 때 한 번 내려받는다(core/ppstructure.js)
 const PP_DIR = path.join(path.dirname(SETTINGS_FILE), "models", "pp-structure");
 const PP_LAYOUT_TAG = "dc5670eb";   // 레이아웃 모델(PP-DocLayoutV3.onnx sha256 앞부분) — 모델이 바뀌면 저장된 결과를 쓰지 않는다
@@ -191,8 +172,9 @@ try {
 const OCR_COMMON = [
   ["kor", "한국어"], ["eng", "영어"], ["jpn", "일본어"], ["chi_sim", "중국어(간체)"], ["chi_tra", "중국어(번체)"],
   ["fra", "프랑스어"], ["deu", "독일어"], ["spa", "스페인어"], ["ita", "이탈리아어"], ["por", "포르투갈어"],
-  ["rus", "러시아어"], ["ukr", "우크라이나어"], ["vie", "베트남어"], ["tha", "태국어"], ["ind", "인도네시아어"],
-  ["ara", "아랍어"], ["heb", "히브리어"], ["hin", "힌디어"], ["tur", "튀르키예어"], ["nld", "네덜란드어"],
+  ["rus", "러시아어"], ["ukr", "우크라이나어"], ["pol", "폴란드어"], ["vie", "베트남어"], ["tha", "태국어"], ["ind", "인도네시아어"],
+  ["ara", "아랍어"], ["fas", "페르시아어"], ["heb", "히브리어"], ["hin", "힌디어"], ["tur", "튀르키예어"], ["nld", "네덜란드어"],
+  ["ell", "그리스어"], ["tam", "타밀어"], ["tel", "텔루구어"], ["ces", "체코어"], ["swe", "스웨덴어"], ["dan", "덴마크어"],
 ];
 const validOcrCode = (v) => /^[a-z][a-z0-9_]{1,19}$/.test(String(v || ""));
 function cleanOcrLanguages(value) {
@@ -221,20 +203,26 @@ async function installOcrLanguages(languages) {
 }
 function ocrLanguageState(downloaded = []) {
   const selected = loadSettings().ocrLanguages, installed = installedOcrLanguages();
+  const paddle = paddlePackState(PADDLE_OCR_DIR, selected);
   const names = new Map(OCR_COMMON), known = new Set(names.keys());
   const extras = [...new Set([...selected, ...installed])].filter((code) => !known.has(code)).map((code) => [code, code]);
   return {
-    languages: [...OCR_COMMON, ...extras].map(([code, name]) => ({ code, name: names.get(code) || name, installed: installed.includes(code) })),
-    selected, installed, downloaded,
+    languages: [...OCR_COMMON, ...extras].map(([code, name]) => {
+      const packs = paddlePacksForLanguages([code]);
+      return { code, name: names.get(code) || name, installed: installed.includes(code), paddle: packs.map((p) => PADDLE_PACKS[p]?.name).filter(Boolean) };
+    }),
+    selected, installed, downloaded, paddle: { supported: !!paddleOcrProvider, ...paddle },
   };
 }
 async function setOcrLanguages(raw) {
   if (!Array.isArray(raw) || raw.some((code) => !validOcrCode(code)) || raw.length > 8) throw Object.assign(new Error("OCR 언어 코드는 영문 소문자·숫자·밑줄로 입력하고, 최대 8개까지 선택할 수 있습니다."), { status: 400 });
   const languages = cleanOcrLanguages(raw);
   const downloaded = await installOcrLanguages(languages);
+  const packs = paddlePacksForLanguages(languages);
+  const paddleDownloaded = paddleOcrProvider ? await installPaddlePacks(PADDLE_OCR_DIR, packs) : [];
   saveSettings({ ocrLanguages: languages });
-  for (const session of sessions.values()) session.setOcrLanguages(languages);
-  return ocrLanguageState(downloaded);
+  await host.call("setOcrConfig", { cfg: ocrConfig(languages) });
+  return { ...ocrLanguageState(downloaded), paddleDownloaded };
 }
 
 // PDF 주석(형광펜·북마크·포스트잇 메모): 파일 내용(해시)별로 저장한다
@@ -325,6 +313,15 @@ function securityHeaders(res, pathname) {
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
   let csp = "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'";
   if (pathname.startsWith("/studio/")) csp += " 'unsafe-eval' 'wasm-unsafe-eval'";
+  // 숨은 로컬 OCR 화면만: OpenCV.js가 초기화 때 new Function을 쓰고 ONNX Runtime Web이 WASM을 컴파일한다.
+  // 일반 앱·문서·API 화면에는 이 예외를 주지 않는다.
+  if (pathname.startsWith("/paddle-sdk/") || pathname.startsWith("/paddle-ort/")) {
+    csp += " 'unsafe-eval' 'wasm-unsafe-eval'";
+    // 숨은 OCR 창만 프로세스 격리를 켜 SharedArrayBuffer 기반 WASM 다중 스레드를 허용한다.
+    // 앱 본문과 PDF iframe에는 적용하지 않아 기존 화면·외부 자료 호환성에 영향을 주지 않는다.
+    res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+    res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+  }
   if (/^\/pdf\/\d+\/view$/.test(pathname)) csp = "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'";
   res.setHeader("Content-Security-Policy", csp);
 }
@@ -372,10 +369,14 @@ const API = {
 
 // /pdf/{id}/… : 열어 둔 PDF 한 부
 async function servePdf(req, res, url, s, what) {
-  if (what === "view") { const h = (await mods()).buildShellHtml(s.id, s.meta()); sendBytes(res, h.replace("</head>", accentStyle() + "</head>"), MIME[".html"]); return; }
-  if (what === "status") { sendJson(res, 200, s.meta()); return; }
+  if (what === "view") { const h = (await mods()).buildShellHtml(s.id, await host.call("meta", { sid: s.id })); sendBytes(res, h.replace("</head>", accentStyle() + "</head>"), MIME[".html"]); return; }
+  if (what === "status") { sendJson(res, 200, await host.call("meta", { sid: s.id })); return; }
+  if (what === "trim" && req.method === "POST") {
+    s.images.trim(); await host.call("trimViewCaches", { sid: s.id }); if (hotSessionId === s.id) hotSessionId = null;
+    sendJson(res, 200, { ok: true }); return;
+  }
   // 서브뷰에서 PDF 탭을 닫으면: 세션(쪽 그림·글자층·문단 복원 결과, 탭마다 50~110MB)을 바로 내려놓는다
-  if (what === "close" && req.method === "POST") { s.close(); sessions.delete(s.id); sendJson(res, 200, { ok: true }); return; }
+  if (what === "close" && req.method === "POST") { await closePdf(s); sendJson(res, 200, { ok: true }); return; }
   if (what === "annotations") {
     sendJson(res, 200, req.method === "POST" ? savePdfAnnotations(s, await readJson(req, 2 * 1024 * 1024)) : loadPdfAnnotations(s), { "Cache-Control": "no-store" });
     return;
@@ -384,37 +385,50 @@ async function servePdf(req, res, url, s, what) {
     // 그림 모두 내려받기: 보기 화면의 그림(배경 없이 꺼낸 오브젝트)을 쪽 순서대로 한 ZIP 으로
     // POST {ids:["쪽:그림id", …]} 이면 목록에서 고른 그림만(그림 내보내기 창), GET 이면 모두
     const body = req.method === "POST" ? await readJson(req, 1024 * 1024) : null;
-    const entries = s.figureZipEntries(Array.isArray(body?.ids) ? body.ids : null);
-    if (!entries) { sendJson(res, 409, { error: "아직 그림을 찾는 중입니다." }); return; }
-    if (!entries.length) { sendJson(res, 404, { error: body ? "고른 그림을 꺼내지 못했습니다." : "이 PDF에는 꺼낼 그림이 없습니다." }); return; }
-    const { zipBytes } = await import("./core/export-files.js");
+    const z = await host.call("imagesZip", { sid: s.id, ids: Array.isArray(body?.ids) ? body.ids : null });   // ZIP 도 작업 스레드에서 묶는다
+    if (z.count === null) { sendJson(res, 409, { error: "아직 그림을 찾는 중입니다." }); return; }
+    if (!z.count) { sendJson(res, 404, { error: body ? "고른 그림을 꺼내지 못했습니다." : "이 PDF에는 꺼낼 그림이 없습니다." }); return; }
     const base = String(s.name || "PDF").replace(/\.pdf$/i, "") + "-그림.zip";
-    sendBytes(res, zipBytes(entries), "application/zip", { "Content-Disposition": `attachment; filename="images.zip"; filename*=UTF-8''${encodeURIComponent(base)}`, "Cache-Control": "no-store" });
+    sendBytes(res, Buffer.from(z.zip), "application/zip", { "Content-Disposition": `attachment; filename="images.zip"; filename*=UTF-8''${encodeURIComponent(base)}`, "Cache-Control": "no-store" });
     return;
   }
-  if (what === "figures") { const list = s.figureList(); sendJson(res, list ? 200 : 409, list || []); return; }
+  if (what === "figures") { const list = await host.call("figureList", { sid: s.id }); sendJson(res, list ? 200 : 409, list || []); return; }
+  const analyzeImagesMatch = what.match(/^analyze-images\/(\d+)$/);
+  if (analyzeImagesMatch && req.method === "POST") {
+    try { sendJson(res, 200, await host.call("analyzePageImages", { sid: s.id, n: +analyzeImagesMatch[1] }), { "Cache-Control": "no-store" }); }
+    catch (e) { sendJson(res, 409, { error: String(e?.message || e) }); }
+    return;
+  }
   if (what === "content") {
     const pages = (url.searchParams.get("pages") || "").split(",").filter(Boolean).map(Number);
     if (!pages.length || pages.some((n) => !Number.isInteger(n) || n < 0 || n >= s.pageSizes.length)) { sendJson(res, 400, { error: "페이지 범위가 올바르지 않습니다." }); return; }
     // 사진·스캔 쪽은 여기서 그림 속 글자(OCR)를 읽어 함께 넣는다(아직 읽지 않은 쪽이면 시간이 걸린다)
     // 규칙 적용(images=1: 오브젝트 그림, tables=1: 표 모양 유지, blanks=1: 문단 사이 빈 줄 살리기, scan=1: 스캔본 표 인식). 모두 없으면 글만
     const on = (k) => url.searchParams.get(k) === "1";
-    const c = await s.content(pages, { includeImages: on("images"), keepTables: on("tables"), keepBlankLines: on("blanks"), scanTables: on("scan") });
+    const rubyMode = ["position", "parentheses"].includes(url.searchParams.get("ruby")) ? url.searchParams.get("ruby") : "position";
+    const c = await host.call("content", { sid: s.id, pages, opts: { includeImages: on("images"), keepTables: on("tables"), keepBlankLines: on("blanks"), scanTables: on("scan"), rubyMode } });
     if (!c) { sendJson(res, 409, { error: "문서화 준비 중입니다." }); return; }
-    if (!c.text.trim() && !s.ocrReady()) { sendJson(res, 409, { error: "가져올 본문이 없습니다. 사진·스캔 PDF라면 도구 → 환경 설정 → OCR 언어에서 언어 자료를 설치해 주세요." }); return; }
+    if (!c.text.trim() && !(await host.call("ocrReady", { sid: s.id }))) { sendJson(res, 409, { error: "가져올 본문이 없습니다. 사진·스캔 PDF라면 도구 → 환경 설정 → OCR 언어에서 언어 자료를 설치해 주세요." }); return; }
     sendJson(res, 200, { text: c.text, html: c.html, pages: pages.map((n) => n + 1) });
     return;
   }
   let m;
-  if ((m = what.match(/^thumb\/(\d+)\.jpg$/)) && +m[1] < s.pageSizes.length) { sendBytes(res, Buffer.from(s.pageThumb(+m[1])), "image/jpeg", { "Cache-Control": "max-age=3600" }); return; }
-  if ((m = what.match(/^page\/(\d+)\.jpg$/))) { sendBytes(res, Buffer.from(s.pageImage(+m[1])), "image/jpeg", { "Cache-Control": "max-age=3600" }); return; }
-  if ((m = what.match(/^text\/(\d+)$/))) { sendBytes(res, s.textLayer(+m[1]), MIME[".html"]); return; }
+  if ((m = what.match(/^layout-log\/(\d+)$/))) {
+    const log = await host.call("layoutLog", { sid: s.id, n: +m[1] });
+    sendJson(res, log ? 200 : 409, log || { error: "아직 진단할 수 없습니다." }, { "Cache-Control": "no-store" }); return;
+  }
+  if ((m = what.match(/^thumb\/(\d+)\.jpg$/)) && +m[1] < s.pageSizes.length) { sendBytes(res, Buffer.from(await s.images.thumb(+m[1])), "image/jpeg", { "Cache-Control": "max-age=3600" }); return; }
+  if ((m = what.match(/^page\/(\d+)\.jpg$/))) {
+    const scale = Math.max(0.6, Math.min(2.75, Number(url.searchParams.get("scale")) || 1.25));
+    sendBytes(res, Buffer.from(await s.images.image(+m[1], scale)), "image/jpeg", { "Cache-Control": "max-age=3600" }); return;
+  }
+  if ((m = what.match(/^text\/(\d+)$/))) { sendBytes(res, await host.call("textLayer", { sid: s.id, n: +m[1] }), MIME[".html"]); return; }
   if ((m = what.match(/^ocr\/(\d+)$/))) {
-    const h = await s.ocrPage(+m[1]);                     // null: 언어 자료 없음
+    const h = await host.call("ocrPage", { sid: s.id, n: +m[1] });                     // null: 언어 자료 없음
     res.writeHead(h === null ? 409 : 200, { "Content-Type": MIME[".html"] }).end(h || ""); return;
   }
   if ((m = what.match(/^image\/(\d+)\/([\w-]+)$/))) {
-    const file = s.figureFile(+m[1], m[2]);
+    const file = await host.call("figureFile", { sid: s.id, n: +m[1], fid: m[2] });
     if (!file) { res.writeHead(404).end("그림 없음"); return; }
     const ext = String(file.ext || "png").toLowerCase().replace("jpg", "jpeg");
     sendBytes(res, Buffer.from(file.data), `image/${ext}`, { "Cache-Control": "max-age=3600" });
@@ -459,14 +473,22 @@ export function startServer(port = 0, { authToken = "" } = {}) {
         catch (e) { sendJson(res, e.status || 500, { error: String(e?.message || e) }); }
         return;
       }
+      if (p.startsWith("/api/paddle-model/") && req.method === "GET") {
+        const name = decodeURIComponent(p.slice("/api/paddle-model/".length)).replace(/\.tar$/i, "");
+        if (!PADDLE_MODELS[name]) { res.writeHead(404).end("없는 OCR 모델"); return; }
+        const file = paddleModelPath(PADDLE_OCR_DIR, name);
+        if (!fs.existsSync(file)) { res.writeHead(404).end("설치되지 않은 OCR 모델"); return; }
+        const st = fs.statSync(file);
+        res.writeHead(200, { "Content-Type": "application/x-tar", "Content-Length": st.size,
+          "Cache-Control": "private, max-age=31536000, immutable" });
+        fs.createReadStream(file).pipe(res); return;
+      }
       if (p === "/api/pp-structure") { sendJson(res, 200, req.method === "POST" ? await ppStartInstall() : await ppStatus(), { "Cache-Control": "no-store" }); return; }
       if (p === "/api/settings") {
         const patch = req.method === "POST" ? await readJson(req, 65536) : null;
         const settings = patch ? saveSettings(patch) : loadSettings();
-        if (patch && Object.prototype.hasOwnProperty.call(patch, "pdfRules")) for (const s of sessions.values()) {
-          s.autoLayout = !!settings.pdfRules.scanTables;
-          s.cancelLayoutPrefetch();                               // 설정만 바꿀 때는 분석하지 않고 문서화 요청 때 실행
-        }
+        // 설정만 바꿀 때는 분석하지 않고 문서화 요청 때 실행
+        if (patch && Object.prototype.hasOwnProperty.call(patch, "pdfRules")) await host.call("setAutoLayout", { value: !!settings.pdfRules.scanTables });
         sendJson(res, 200, settings); return;
       }
       const pm = p.match(/^\/pdf\/(\d+)\/(.+)$/);

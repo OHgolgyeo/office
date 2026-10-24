@@ -18,9 +18,10 @@ export function renderTextLayers(input, res, opts = {}) {
   for (const page of input.pages) {
     if (opts.pages && !opts.pages.includes(page.index)) continue;
     let textLayer = "";
-    const tlHtml = (l, pid, join = "") => {
+    const flowParts = [];
+    const tlHtml = (l, pid, join = "", blank = 0) => {
       const g = l.glyphs.find((q) => !/\s/.test(q.c)) || l.glyphs[0];
-      const head = `<div class="tl" data-pid="${pid}" data-join="${join}" data-w="${(l.x1 - l.x0).toFixed(2)}" style="left:${l.x0}pt;top:${l.oy - l.size * 0.88}pt;font-size:${l.size}pt;font-family:${esc(fontCss(g.font))}">`;
+      const head = `<div class="tl" data-pid="${pid}" data-flow="${esc(l.group || "")}" data-join="${join}"${blank ? ` data-blank="${blank}"` : ""} data-w="${(l.x1 - l.x0).toFixed(2)}" style="left:${l.x0}pt;top:${l.oy - l.size * 0.88}pt;font-size:${l.size}pt;font-family:${esc(fontCss(g.font))}">`;
       // 낱말마다 원래 자리에 둔다: 줄 전체를 한 번에 늘이면(scaleX) 화면 글꼴과 PDF 글꼴의 글자 폭 차이·양쪽 정렬로 벌어진
       // 띄어쓰기가 줄 가운데로 갈수록 쌓여, 드래그할 때 마우스와 선택 위치가 어긋났다. 낱말(띄어쓰기로 나뉜 덩이)마다 시작 자리와
       // 폭을 주면 어긋남이 낱말 하나 안으로 줄어든다. 낱말 수가 글 줄과 맞지 않으면(문장부호 복구로 글이 바뀐 줄 등) 예전처럼 줄 통째로.
@@ -38,15 +39,78 @@ export function renderTextLayers(input, res, opts = {}) {
       return head + inner + "</div>";
     };
     const groupedLines = new Set();
+    const lineBox = (l) => [l.x0, l.oy - l.size, l.x1, l.oy];
+    const mergeBox = (a, b) => a ? [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])] : b;
+    // 복사할 때 PDF 에서 문단 사이가 한 줄 이상 비어 있던 곳에 빈 줄을 넣도록, 문단 첫 줄에 빈 줄 수(data-blank)를 둔다.
+    // 문서화의 "빈 줄 살리기"(session.js blankLinesBetween)와 같은 잣대: 같은 단에서 줄 간격의 0.75배 넘게 더 벌어졌으면.
+    // 본문 다음에 오는 제목 앞에도 빈 줄 하나(문서화와 같다). 제목 바로 뒤 본문은 PDF 에 빈 줄이 있을 때만 띄운다.
+    let prevLast = null, prevHeading = null;
+    const blanksBefore = (b) => {
+      const a = prevLast;
+      if (!a || b.x1 <= a.x0 || b.x0 >= a.x1) return 0;
+      const pitch = Math.max(a.pitch || b.pitch || 0, Math.max(a.size, b.size) * 1.2);
+      const extra = (b.oy - a.oy) / pitch - 1;
+      return Number.isFinite(extra) && extra >= 0.75 ? Math.min(3, Math.round(extra)) : 0;
+    };
     res.paragraphs.forEach((p, pid) => {
       const lines = p.lines.map((li, k) => ({ li, k, l: res.lines[li] })).filter(({ l }) => l.page === page.index && !l.rotated);
       if (!lines.length) return;
+      const heading = !!opts.isHeading?.(pid);
+      const blank = Math.max(prevHeading === false && heading ? 1 : 0, blanksBefore(lines[0].l));
+      prevLast = lines.at(-1).l; prevHeading = heading;
       lines.forEach(({ li }) => groupedLines.add(li));
-      const inner = lines.map(({ li, k, l }) => tlHtml(l, `p${pid}`, k < p.lines.length - 1 ? (res.joins[li]?.kind || "") : "")).join("");
-      textLayer += `<div class="opara" data-pid="p${pid}">${inner}</div>`;
+      // 한 문단이 왼쪽 단 끝에서 오른쪽 단 첫 줄로 이어질 수 있다. 브라우저의 기본 선택은
+      // 절대 배치된 두 단을 하나의 상자로 취급해 반대 단까지 튀므로, 같은 단 흐름끼리 나눈다.
+      let flow = null, inner = "", box = null;
+      const flush = () => { if (inner) flowParts.push({ flow, box, html: `<div class="opara" data-pid="p${pid}">${inner}</div>` }); inner = ""; box = null; };
+      lines.forEach(({ li, k, l }) => {
+        const nextFlow = l.group || `line:${li}`;
+        if (flow !== null && nextFlow !== flow) flush();
+        flow = nextFlow;
+        box = mergeBox(box, lineBox(l));
+        inner += tlHtml(l, `p${pid}`, k < p.lines.length - 1 ? (res.joins[li]?.kind || "") : "", l === lines[0].l ? blank : 0);
+      });
+      flush();
     });
-    res.lines.forEach((l, i) => { if (!groupedLines.has(i) && l.page === page.index && !l.rotated) textLayer += tlHtml(l, `l${i}`); });
-    res.furniture.forEach((l, i) => { if (l.page === page.index && !l.rotated) textLayer += tlHtml(l, `f${i}`); });
+    res.lines.forEach((l, i) => { if (!groupedLines.has(i) && l.page === page.index && !l.rotated) flowParts.push({ flow: l.group || `line:${i}`, box: lineBox(l), html: tlHtml(l, `l${i}`) }); });
+    res.furniture.forEach((l, i) => { if (l.page === page.index && !l.rotated) flowParts.push({ flow: l.group || `furniture:${i}`, box: lineBox(l), html: tlHtml(l, `f${i}`) }); });
+
+    // 같은 구역 안에 단 번호가 둘 이상 있을 때만 드래그 경계를 켠다. 제목/표처럼 별도 흐름인
+    // 요소까지 무조건 가두지 않아, 일반 문서의 여러 문단 선택과 Ctrl+A는 그대로 동작한다.
+    const familyCols = new Map();
+    for (const { flow } of flowParts) {
+      const m = String(flow).match(/^(\d+):(\d+):(-?\d+(?:\.\d+)?):(-?\d+)/);
+      if (!m) continue;
+      const family = `${m[1]}:${m[2]}:${m[4]}`;
+      if (!familyCols.has(family)) familyCols.set(family, new Set());
+      familyCols.get(family).add(m[3]);
+    }
+    const multiColumnFlows = new Set();
+    const flowBoxes = new Map();
+    for (const { flow, box } of flowParts) flowBoxes.set(flow, mergeBox(flowBoxes.get(flow), box));
+    const boxes = [...flowBoxes];
+    for (let i = 0; i < boxes.length; i++) for (let k = i + 1; k < boxes.length; k++) {
+      const [af, a] = boxes[i], [bf, b] = boxes[k];
+      const horizontalGap = Math.max(b[0] - a[2], a[0] - b[2]);
+      const verticalOverlap = Math.min(a[3], b[3]) - Math.max(a[1], b[1]);
+      // 단 번호가 다르게 잡히지 않은 글상자·사이드바도 실제 좌표가 좌우로 나란하면 독립 선택 영역이다.
+      // 제목 한 줄끼리 우연히 나란한 경우를 피하려고 세로로 4pt 이상 겹칠 때만 적용한다.
+      if (horizontalGap > 3 && verticalOverlap > 4) { multiColumnFlows.add(af); multiColumnFlows.add(bf); }
+    }
+    const isMultiColumnFlow = (flow) => {
+      const m = String(flow).match(/^(\d+):(\d+):(-?\d+(?:\.\d+)?):(-?\d+)/);
+      return multiColumnFlows.has(flow) || (!!m && (familyCols.get(`${m[1]}:${m[2]}:${m[4]}`)?.size || 0) > 1);
+    };
+    // 같은 단의 제목·본문 사이에 다른 단의 문단이 끼어 검출된 경우에도 DOM에서는 한 덩이로 둔다.
+    // 그렇지 않으면 같은 오른쪽 단을 위→아래로 드래그할 때 그 사이에 있던 왼쪽 글상자가 함께 선택된다.
+    const flowHtml = new Map();
+    for (const part of flowParts) {
+      flowHtml.set(part.flow, (flowHtml.get(part.flow) || "") + part.html);
+    }
+    for (const [flow, html] of flowHtml) {
+      const multi = isMultiColumnFlow(flow) ? " multicol" : "";
+      textLayer += `<div class="oflow${multi}" data-flow="${esc(flow)}">${html}</div>`;
+    }
     pages.push({ index: page.index, textLayer });
   }
   return pages;

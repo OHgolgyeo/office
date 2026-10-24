@@ -10,7 +10,11 @@ process.on("disconnect", () => process.exit(0));                 // 앱(부모)�
 
 const ort = await import("onnxruntime-node");
 try { ort.env.logLevel = "error"; } catch { /* 설정 못 함 */ }
-const opts = { graphOptimizationLevel: "all", logSeverityLevel: 3 };
+// 메모리 풀(arena)·메모리 패턴을 끈다: 켜 두면 PP-DocLayoutV3 하나에 약 1.1GB 를 잡고 놓지 않았다(끄면 약 0.3GB).
+// 대신 쪽당 계산이 1.3초 → 1.6초쯤으로 느려진다(2026-10-23 측정). 레이아웃 분석은 뒤에서 도는 일이라 메모리를 아끼는 쪽을 골랐다.
+// intraOpNumThreads: 2 — 기본은 코어 4개를 꽉 써서, PDF 를 열면 뒤에서 전체 쪽을 미리 읽는 동안 컴퓨터 전체가 무거웠다.
+// 2개로 줄이면 CPU 사용이 절반이고 쪽당 1.6초 → 1.9초쯤으로 조금 느려진다(2026-10-23 측정). 프로세스 우선순위도 낮춘다(ppstructure.js).
+const opts = { graphOptimizationLevel: "all", logSeverityLevel: 3, enableCpuMemArena: false, enableMemPattern: false, intraOpNumThreads: 2 };
 const sessions = {};
 try {
   for (const [name, file] of Object.entries(models)) sessions[name] = await ort.InferenceSession.create(file, opts);

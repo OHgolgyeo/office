@@ -1085,11 +1085,12 @@ function ogTabOperation(kind, fn) {
 function ogSelectTab(i, moveCursor = true) {
   const tabs = ogTabList(); if (!tabs[i]) return;
   ogTab.active = i;
-  ogRedraw();                                                       // 숨겼던 쪽은 예전 그림이 남아 있을 수 있어 새로 그린다
+  const redrawn = ogRedraw();                                       // 숨겼던 쪽은 예전 그림이 남아 있을 수 있어 새로 그린다
   if (moveCursor) { try { window.__ogolgyeStudio.inputHandler.moveCursorTo({ sectionIndex: 0, paragraphIndex: tabs[i].para, charOffset: 0 }); } catch { /* 그대로 */ } }
   const c = window.__ogolgyeStudio?.inputHandler?.container; if (c) c.scrollTop = 0;
   ogRenderTabs();
   try { window.__ogolgyeStudio.inputHandler.focus(); } catch { /* 초점 */ }
+  return redrawn;
 }
 function ogAddTab() {
   const tabs = ogTabList();
@@ -1234,6 +1235,26 @@ function ogInstallTabs() {
   document.addEventListener("mousedown", (e) => { if (!item.contains(e.target)) item.classList.remove("open"); }, true);
   // 커서가 다른 탭으로 넘어가면(방향키 등) 그 탭으로 바꾼다 / 문서가 바뀌면 목차를 새로
   const bus = window.__ogolgyeStudio.eventBus;
+  // 페이지 목록으로 문서를 나눈 때에는 현재 목록의 끝이 곧 전체 스크롤의 끝이다. 여기서 아래 휠을 계속 보내면
+  // 가상 스크롤이 끝 위치를 고정하는 일과 쪽 재배치가 맞물려 화면이 위아래로 튀었다. 끝에서 한 번 더 내리면
+  // 다음 목록으로 넘어가고, 전환 중에 이어지는 터치패드 관성 입력은 삼켜 두 목록을 한꺼번에 건너뛰지 않는다.
+  const scroll = window.__ogolgyeStudio.inputHandler?.container;
+  let wheelSwitching = false;
+  scroll?.addEventListener("wheel", (e) => {
+    if (e.ctrlKey || e.deltaY <= 0 || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+    const tabs = ogTabList(); if (tabs.length < 2) return;
+    if (wheelSwitching) { e.preventDefault(); e.stopImmediatePropagation(); return; }
+    const atEnd = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 3;
+    if (!atEnd) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    const next = ogTab.active + 1;
+    if (next >= tabs.length) { scroll.scrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight); return; }
+    wheelSwitching = true;
+    Promise.resolve(ogSelectTab(next)).finally(() => {
+      scroll.scrollTop = 0;
+      setTimeout(() => { wheelSwitching = false; }, 100);
+    });
+  }, { passive: false, capture: true });
   bus.on("cursor-rect-updated", () => {
     try {
       const pos = window.__ogolgyeStudio.inputHandler.cursor.getPosition();
@@ -1341,13 +1362,37 @@ function ogParseApiDesign(html) {
       if (n.startsWith("on") || ((n === "href" || n === "src" || n === "action" || n === "formaction") && v.startsWith("javascript:"))) el.removeAttribute(a.name);
     }
   });
-  const input = t.content.querySelector("[data-api-input]"), output = t.content.querySelector("[data-api-output]");
+  // 표시(data-api-…)가 없으면 짐작해서 붙인다: 다른 곳(AI 등)에서 만든 디자인은 보통 이 표시 없이 id·class 만 있다.
+  //  입력칸 = 첫 여러 줄 입력칸(textarea), 없으면 첫 글 입력칸 / 결과칸 = id·class·name 에 결과·output 같은 말이 든 요소,
+  //  없으면 입력칸이 아닌 마지막 textarea, 그래도 없으면 맨 끝에 결과칸을 하나 만든다 / 실행 단추 = 글자에 실행·번역·run 같은 말이 든
+  //  단추, 없으면 첫 단추, 그래도 없으면 실행 단추를 하나 만든다. 짐작한 것은 guessed 에 남겨 창 아래에 알린다.
+  const guessed = [];
+  const c = t.content;
+  if (!c.querySelector("[data-api-input]")) {
+    const el = c.querySelector("textarea") || c.querySelector('input:not([type]),input[type="text"],input[type="search"]');
+    if (el) { el.setAttribute("data-api-input", ""); guessed.push("입력칸"); }
+  }
+  if (!c.querySelector("[data-api-output]")) {
+    const inp = c.querySelector("[data-api-input]");
+    const named = [...c.querySelectorAll("[id],[class],[name]")].find((el) => el !== inp && !el.matches("button,input[type=button],input[type=submit],style")
+      && /(output|result|answer|response|translat(ed|ion)|결과|출력|답변|응답|번역문)/i.test(el.id + " " + (el.getAttribute("class") || "") + " " + (el.getAttribute("name") || "")));
+    let el = named || [...c.querySelectorAll("textarea")].filter((x) => x !== inp).pop();
+    if (!el && inp) { el = document.createElement("div"); el.style.whiteSpace = "pre-wrap"; c.appendChild(el); }
+    if (el) { el.setAttribute("data-api-output", ""); guessed.push("결과칸"); }
+  }
+  if (!c.querySelector('[data-api-action="run"]')) {
+    const btns = [...c.querySelectorAll('button,input[type="button"],input[type="submit"]')];
+    let el = btns.find((b) => /(실행|번역|변환|보내기|전송|요청|생성|질문|다듬|요약|run|go|send|submit|translate|generate|ask|convert)/i.test(b.textContent || b.value || "")) || btns[0];
+    if (!el && c.querySelector("[data-api-input]")) { el = document.createElement("button"); el.textContent = "실행"; c.appendChild(el); }
+    if (el) { el.setAttribute("data-api-action", "run"); guessed.push("실행 단추"); }
+  }
+  const input = c.querySelector("[data-api-input]"), output = c.querySelector("[data-api-output]");
   const problems = [];
   if (!input) problems.push("입력칸에 data-api-input 표시가 없습니다(예: <textarea data-api-input>)");
   else if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement)) problems.push("data-api-input 은 <textarea> 나 <input> 에 붙여야 합니다");
   if (!output) problems.push("결과칸에 data-api-output 표시가 없습니다(예: <textarea data-api-output>)");
   if (!t.content.querySelector('[data-api-action="run"]')) problems.push('실행 단추에 data-api-action="run" 표시가 없습니다(예: <button data-api-action="run">)');
-  return { t, input, output, problems };
+  return { t, input, output, problems, guessed };
 }
 function ogApiDesignProblems(html) { return String(html || "").trim() ? ogParseApiDesign(html).problems : []; }
 function ogSafeApiDesign(html) {
@@ -1387,6 +1432,7 @@ function ogApplyApiDesign(panel, tool) {
   body.classList.toggle("custom", !!custom || tool?.provider === "google_cloud");
   // 직접 만든 디자인을 쓰지 못했으면 그 이유를 창의 상태 줄에 보여 준다(ogOpenAiTool)
   panel.__ogDesignProblems = custom ? [] : ogApiDesignProblems(tool?.designHtml);
+  panel.__ogDesignGuessed = custom && String(tool?.designHtml || "").trim() ? ogParseApiDesign(tool.designHtml).guessed : [];
 }
 const ogApiGet = (el) => el && "value" in el ? el.value : (el?.textContent || "");
 const ogApiSet = (el, value) => { if (!el) return; if ("value" in el) el.value = value; else el.textContent = value; };
@@ -1432,7 +1478,10 @@ function ogAiPanel() {
   const head = panel.querySelector(".og-ai-head"); let drag = null;
   head.addEventListener("mousedown", (e) => { if (!panel.classList.contains("float") || e.target.closest("button")) return; const r = panel.getBoundingClientRect(); drag = { x: e.clientX - r.left, y: e.clientY - r.top }; e.preventDefault(); });
   addEventListener("mousemove", (e) => { if (!drag) return; panel.style.left = `${Math.max(0, Math.min(innerWidth - panel.offsetWidth, e.clientX - drag.x))}px`; panel.style.top = `${Math.max(90, Math.min(innerHeight - 80, e.clientY - drag.y))}px`; panel.style.right = "auto"; });
-  addEventListener("mouseup", () => { drag = null; });
+  // 창은 마우스 놓기(mouseup)가 편집 화면에 새지 않게 막는다. 그래서 창 위에서 놓으면 이 듣기 함수까지 오지 않아 끌기가 끝나지 않고
+  // 창이 마우스를 계속 따라다녔다 → 이벤트가 내려가는 단계(capture)에서 먼저 듣는다. 단추를 뗀 채 움직여도 끝낸다.
+  addEventListener("mouseup", () => { drag = null; }, true);
+  addEventListener("mousemove", (e) => { if (drag && !(e.buttons & 1)) drag = null; }, true);
   return panel;
 }
 function ogAiReplaceSelection(panel) {
@@ -1457,7 +1506,7 @@ function ogOpenAiTool(tool, preview = false) {
   panel.dataset.tool = tool.id; panel.style.setProperty("--ai-color", tool.color); panel.querySelector(".og-ai-title").textContent = tool.name; panel.querySelector(".og-ai-title-icon").textContent = tool.icon;
   panel.className = `og-ai-panel ${tool.view === "side" ? `side ${tool.side}` : "float"}`; panel.style.left = panel.style.right = panel.style.top = "";
   const source = preview ? { text: "안녕하세요. 만나서 반갑습니다.", segments: [], kind: "preview" } : selected?.text ? selected : ogPageSource(); ogApiSet(input, source.text); input.__ogSource = source; panel.__ogSource = source;
-  ogApiSet(ogAiQ(panel, ".og-ai-output"), preview ? "Hello. Nice to meet you." : ""); const status = ogAiQ(panel, ".og-ai-status"); if (status) status.textContent = panel.__ogDesignProblems?.length ? "직접 만든 디자인을 쓰지 못해 기본 디자인으로 열었습니다: " + panel.__ogDesignProblems.join(" / ") : preview ? "디자인 미리보기 · API는 호출하지 않았습니다." : selected?.text ? "선택한 글을 가져왔습니다." : "현재 페이지의 글을 가져왔습니다."; panel.hidden = false;
+  ogApiSet(ogAiQ(panel, ".og-ai-output"), preview ? "Hello. Nice to meet you." : ""); const status = ogAiQ(panel, ".og-ai-status"); if (status) status.textContent = panel.__ogDesignProblems?.length ? "직접 만든 디자인을 쓰지 못해 기본 디자인으로 열었습니다: " + panel.__ogDesignProblems.join(" / ") : panel.__ogDesignGuessed?.length && preview ? "디자인에 연결 표시가 없어 " + panel.__ogDesignGuessed.join("·") + "을(를) 짐작해 연결했습니다. 다르면 data-api-input·data-api-output·data-api-action=\"run\" 을 붙여 주세요." : preview ? "디자인 미리보기 · API는 호출하지 않았습니다." : selected?.text ? "선택한 글을 가져왔습니다." : "현재 페이지의 글을 가져왔습니다."; panel.hidden = false;
 }
 // ── 칸 바탕색(서식 줄의 단추) ────────────────────────────────────
 // 편집기에는 "표 > 셀 테두리/배경" 창이 있지만 메뉴 안쪽에 있어 찾기 어렵다(칸 색을 바꾸는 기능이 없는 줄 알았다).
@@ -2373,17 +2422,21 @@ function ogInstallOptionTabs() {
 // 그림 속 글자(OCR) 언어 탭. 선택한 언어 자료만 한 번 내려받고 이후 인식은 모두 컴퓨터 안에서 한다.
 ogOptionTab("og-ocr", "OCR 언어",
   '<div class="dialog-section"><div class="dialog-section-title">그림 속 글자 언어</div>' +
-      '<p class="opt-desc">스캔 PDF와 그림 속 글자를 읽을 언어를 고릅니다. 처음 추가할 때만 공식 Tesseract 언어 자료를 내려받고, 문서 이미지는 외부로 보내지 않습니다. 최대 8개까지 선택할 수 있습니다.</p>' +
+      '<p class="opt-desc">스캔 PDF와 그림 속 글자를 읽을 언어를 고릅니다. 데스크톱 앱은 공식 PaddleOCR의 고급 스캔 모델을 우선 사용하고, 지원하지 않는 언어와 오류가 난 경우 Tesseract로 다시 읽습니다. 필요한 언어 자료만 처음 한 번 내려받으며 문서 이미지는 외부로 보내지 않습니다. 최대 8개까지 선택할 수 있습니다.</p>' +
+      '<p id="og-ocr-engine" class="opt-desc" style="font-weight:600"></p>' +
       '<div id="og-ocr-list" style="display:grid;grid-template-columns:repeat(2,minmax(150px,1fr));gap:7px 18px;margin:12px 0"></div>' +
       '<div class="dialog-row opt-row" style="gap:6px"><label for="og-ocr-custom" style="min-width:94px">언어 코드 추가</label><input id="og-ocr-custom" type="text" spellcheck="false" style="width:150px" placeholder="예: pol"><button type="button" class="dialog-btn" data-og-ocr-add>추가</button></div>' +
       '<p class="opt-desc">목록에 없는 언어는 Tesseract 코드(영문 소문자)를 입력할 수 있습니다.</p>' +
       '<div class="dialog-row opt-row" style="gap:8px"><button type="button" class="dialog-btn dialog-btn-primary" data-og-ocr-save>적용</button><span id="og-ocr-status" class="opt-desc"></span></div></div>',
   (panel) => {
-    const list = panel.querySelector("#og-ocr-list"), status = panel.querySelector("#og-ocr-status"), custom = panel.querySelector("#og-ocr-custom");
+    const list = panel.querySelector("#og-ocr-list"), status = panel.querySelector("#og-ocr-status"), engine = panel.querySelector("#og-ocr-engine"), custom = panel.querySelector("#og-ocr-custom");
     let state = null;
     const render = () => {
       if (!state) return;
-      list.innerHTML = state.languages.map((x) => '<label style="display:flex;align-items:center;gap:7px"><input type="checkbox" value="' + x.code + '" ' + (state.selected.includes(x.code) ? 'checked' : '') + '><span>' + x.name + ' <small style="opacity:.65">(' + x.code + ')' + (x.installed ? ' · 설치됨' : '') + '</small></span></label>').join("");
+      list.innerHTML = state.languages.map((x) => '<label style="display:flex;align-items:center;gap:7px"><input type="checkbox" value="' + x.code + '" ' + (state.selected.includes(x.code) ? 'checked' : '') + '><span>' + x.name + ' <small style="opacity:.65">(' + x.code + ')' + (x.installed ? ' · 언어 자료 설치됨' : '') + (x.paddle?.length ? ' · 고급 OCR 지원' : ' · Tesseract') + '</small></span></label>').join("");
+      engine.textContent = !state.paddle?.supported ? "현재 브라우저 시험 모드: Tesseract 사용" : state.paddle.ready
+        ? (state.paddle.accurate ? "데스크톱 정확도 우선 OCR 준비됨: " : "경량 OCR 사용 중(‘적용’을 누르면 데스크톱 정확도형 검출기 설치): ") + state.paddle.packs.map((p) => ({ korean: "한국어·영어", cjk: "중국어·일본어·영어", latin: "라틴 문자", english: "영어", cyrillic: "키릴 문자", eastSlavic: "러시아어·우크라이나어", arabic: "아랍 문자", devanagari: "데바나가리", thai: "태국어", greek: "그리스어", tamil: "타밀어", telugu: "텔루구어" }[p] || p)).join(", ")
+        : "선택 언어의 고급 스캔 OCR은 아직 설치되지 않았습니다. ‘적용’을 누르면 설치합니다.";
     };
     const load = async () => {
       status.style.color = ""; status.textContent = "언어 목록을 확인하고 있습니다…";
@@ -2408,7 +2461,7 @@ ogOptionTab("og-ocr", "OCR 언어",
         const r = await fetch("/api/ocr-languages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ languages }) });
         const data = await r.json(); if (!r.ok) throw Error(data.error || "저장하지 못했습니다.");
         state = data; render();
-        status.textContent = data.downloaded?.length ? "언어 자료를 설치하고 적용했습니다." : "OCR 언어를 적용했습니다.";
+        status.textContent = data.downloaded?.length || data.paddleDownloaded?.length ? "언어 자료와 고급 스캔 OCR을 설치하고 적용했습니다." : "OCR 언어를 적용했습니다.";
         parent.postMessage({ type: "ogolgye:ocr-updated", languages: data.selected }, location.origin);
       } catch (err) { status.style.color = "#b3261e"; status.textContent = String(err?.message || err); }
       finally { button.disabled = false; }
@@ -2551,6 +2604,45 @@ ogOptionTab("og-google", "Google 드라이브 연결",
     });
     return () => ogGoogle("status").then(show);
   });
+
+// 글자 위 여러 번 클릭: 두 번 = 낱말, 세 번 = 문단, 네 번 = 문서 전체. 편집기에는 F3(누를 때마다 낱말 → 문장 → 문단 → 구역 →
+// 전체로 넓힘)만 있고 마우스에는 연결돼 있지 않아 더블클릭해도 커서만 옮겨졌다. 같은 확장 기능을 쓰되, 블록 선택 모드(F5)에는
+// 머물지 않는다(머물면 이후 화살표가 선택을 넓힌다). 그림·표·글상자·머리말 위 더블클릭은 편집기 원래 동작(개체 편집 등)에 맡긴다.
+function ogSelectByClicks(count) {
+  const ih = window.__ogolgyeStudio?.inputHandler, c = ih?.cursor;
+  if (!c || typeof c.expandSelection !== "function") return;
+  try {
+    if (c.isInPictureObjectSelection?.() || c.isInTableObjectSelection?.() || c.isInHeaderFooter?.()) return;
+    const pos = c.position;
+    // 낱말(본문 문단): 커서가 낱말 바로 뒤의 공백·부호에 놓였으면(낱말 끝을 누르면 그렇다) 앞 낱말을 고른다 — 편집기의 F3 은 그 공백만 골랐다
+    if (count === 2 && pos && pos.parentParaIndex === undefined && c.wasm?.getTextRange) {
+      const len = c.wasm.getParagraphLength(pos.sectionIndex, pos.paragraphIndex);
+      const text = c.wasm.getTextRange(pos.sectionIndex, pos.paragraphIndex, 0, len);
+      const isW = (ch) => /[\p{L}\p{N}_]/u.test(ch || "");
+      let off = Math.min(pos.charOffset, text.length);
+      if (!isW(text[off]) && off > 0 && isW(text[off - 1])) off--;
+      if (isW(text[off])) {
+        let s = off, t = off + 1;
+        while (s > 0 && isW(text[s - 1])) s--;
+        while (t < text.length && isW(text[t])) t++;
+        c.anchor = { ...pos, charOffset: s }; c.position = { ...pos, charOffset: t };
+        c.updateRect?.(); ih.updateSelection?.();
+        return;
+      }
+    }
+    c.enterBlockSelectionMode();
+    if (count === 2) c.expandSelection();                              // 낱말(표 칸 안 등)
+    else if (count === 3) { c._expandPhase = 2; c.expandSelection(); } // 문단
+    else { c._expandPhase = 4; c.expandSelection(); }                  // 문서 전체
+    c._blockSelectionMode = false; c._expandPhase = 0;                 // 선택은 두고 모드만 빠져나온다
+    ih.updateSelection?.();
+  } catch (e) { console.warn("[오골계] 여러 번 클릭 선택:", e?.message || e); }
+}
+document.addEventListener("click", (e) => {
+  if (e.button !== 0 || e.detail < 2 || !(e.target instanceof Element) || !e.target.closest("#scroll-container")) return;
+  if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+  ogSelectByClicks(Math.min(4, e.detail));
+});
 
 // PDF 창의 그림을 끌어다 놓기: 편집 화면의 "그림 끌어다 놓기" 기능으로 놓은 자리에 넣는다
 const OG_IMG = "application/x-ogolgye-pdf-image";

@@ -150,7 +150,7 @@
 :root[data-theme-effective="dark"] .og-ai-input,:root[data-theme-effective="dark"] .og-ai-output { color:var(--ui-text);background:var(--ui-surface-raised);border-color:var(--ui-border); }
 
 /* 환경 설정 → Google 드라이브 연결: 따라 하기 설명 */
-.dialog-wrap:has(> .opt-body) { display: flex; flex-direction: column; max-height: calc(100dvh - 32px); overflow: hidden; }
+.dialog-wrap:has(> .opt-body) { display: flex; flex-direction: column; width: min(580px, calc(100vw - 20px)) !important; max-width: calc(100vw - 20px); max-height: calc(100dvh - 32px); overflow: hidden; }
 .dialog-wrap:has(> .opt-body) > .dialog-title,
 .dialog-wrap:has(> .opt-body) > .dialog-footer { flex: none; }
 .dialog-wrap > .opt-body { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; overflow: hidden; }

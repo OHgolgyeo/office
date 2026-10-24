@@ -71,6 +71,8 @@ async function processModels(dir) {
   const files = { layout: path.join(dir, PP_MODELS[0].file), table: path.join(dir, PP_MODELS[1].file) };
   const child = fork(fileURLToPath(new URL("./ort-process.mjs", import.meta.url)), [JSON.stringify(files)],
     { serialization: "advanced", stdio: ["ignore", "ignore", "inherit", "ipc"], execArgv: [] });
+  // 우선순위를 "보통 이하"로: 뒤에서 전체 쪽을 분석하는 동안에도 앱 화면과 다른 프로그램이 먼저 CPU 를 쓰게 한다
+  try { (await import("node:os")).setPriority(child.pid, (await import("node:os")).constants.priority.PRIORITY_BELOW_NORMAL); } catch { /* 바꾸지 못해도 그대로 돈다 */ }
   const pending = new Map();
   let seq = 0;
   const names = await new Promise((resolve, reject) => {
@@ -124,7 +126,7 @@ async function inProcessModels(dir) {
   const ort = await ortPromise;
   // 모델 출력 모양 경고("Expected shape … does not match")는 결과에 영향이 없는데 터미널을 가득 채운다 → 오류만 남긴다
   try { ort.env.logLevel = "error"; } catch { /* 설정 못 함 */ }
-  const opts = { graphOptimizationLevel: "all", logSeverityLevel: 3 };
+  const opts = { graphOptimizationLevel: "all", logSeverityLevel: 3, enableCpuMemArena: false, enableMemPattern: false, intraOpNumThreads: 2 };   // ort-process.mjs 와 같은 이유
   const [layout, table] = await Promise.all(PP_MODELS.map((m) => ort.InferenceSession.create(path.join(dir, m.file), opts)));
   sessions = { dir, ort, layout, table };
   return sessions;
@@ -158,6 +160,20 @@ export function tablesOf(boxes, minScore = 0.5) {
   for (const f of found.sort((a, b) => b.score - a.score)) {
     if (!kept.some((k) => inter(k.bbox, f.bbox) >= 0.5 * Math.min(area(k.bbox), area(f.bbox)))) kept.push(f);
   }
+  return kept.sort((a, b) => a.bbox[1] - b.bbox[1] || a.bbox[0] - b.bbox[0]);
+}
+
+/** 스캔 쪽 안의 사진·삽화 후보. 페이지 전체 스캔 그림 자체와 작은 장식은 제외하고,
+ *  거의 같은 상자를 겹쳐 찾았을 때는 신뢰도가 높은 하나만 남긴다. */
+export function imagesOf(boxes, pageSize, minScore = 0.45) {
+  const W = Number(pageSize?.w || pageSize?.width || 0), H = Number(pageSize?.h || pageSize?.height || 0), pageArea = Math.max(1, W * H);
+  const area = (b) => Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]);
+  const inter = (a, b) => Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])) * Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+  const found = (boxes || []).filter((b) => (b.label === "image" || b.label === "chart") && b.score >= minScore)
+    .filter((b) => { const w = b.bbox[2] - b.bbox[0], h = b.bbox[3] - b.bbox[1], a = area(b.bbox); return w >= 28 && h >= 24 && a >= pageArea * .006 && a <= pageArea * .72; })
+    .sort((a, b) => b.score - a.score);
+  const kept = [];
+  for (const f of found) if (!kept.some((k) => inter(k.bbox, f.bbox) >= .65 * Math.min(area(k.bbox), area(f.bbox)))) kept.push(f);
   return kept.sort((a, b) => a.bbox[1] - b.bbox[1] || a.bbox[0] - b.bbox[0]);
 }
 

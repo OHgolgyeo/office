@@ -451,12 +451,19 @@ export function reconstruct(input, opts = {}) {
   //   background: 배경 — 같은 그림(같은 픽셀 크기·같은 데이터)이 되풀이되며 쪽의 절반 이상을 덮거나 전체 쪽의 절반 이상에
   //     나오는 것(종이 질감·쪽 머리 장식 띠), 또는 쪽을 거의 덮는 그림 위에 본문이 빽빽한 것. 문서화에 넣지 않는다.
   const repeatKey = (im) => `${im.px?.[0]}x${im.px?.[1]}:${im.rawLen ?? ""}`;
-  const repeatPages = new Map();
-  for (const page of input.pages) for (const key of new Set((page.images || []).map(repeatKey))) repeatPages.set(key, (repeatPages.get(key) || 0) + 1);
+  const repeatPages = new Map(), repeatAt = new Map();
+  for (const page of input.pages) for (const key of new Set((page.images || []).map(repeatKey))) {
+    repeatPages.set(key, (repeatPages.get(key) || 0) + 1);
+    if (!repeatAt.has(key)) repeatAt.set(key, []); repeatAt.get(key).push(page.index);
+  }
+  // 앞표지·뒤표지(첫 쪽·마지막 쪽)에만 같은 그림이 쓰였으면 표지 그림이다(앞·책등·뒤가 이어진 한 장을 두 쪽에 나눠 보이는 책).
+  // 예전에는 "되풀이되며 쪽 절반 이상을 덮는 그림 = 종이 배경"으로 보아 표지 그림이 그림 목록에서 아예 빠졌다(Berlin 1쪽)
+  const lastPage = Math.max(0, ...input.pages.map((p) => p.index));
+  const coverOnly = (im) => (repeatAt.get(repeatKey(im)) || []).every((i) => i === 0 || i === lastPage);
   const glyphsOver = (page, b) => page.glyphs.filter((g) => !isSpace(g.c) && (g.x0 + g.x1) / 2 > b[0] && (g.x0 + g.x1) / 2 < b[2] && (g.y0 + g.y1) / 2 > b[1] && (g.y0 + g.y1) / 2 < b[3]);
   const isBackground = (page, im, b) => {
     const n = repeatPages.get(repeatKey(im)) || 0;
-    if (n < 2) return false;
+    if (n < 2 || (input.pages.length > 2 && coverOnly(im))) return false;
     return n >= input.pages.length * 0.5 || (b[2] - b[0]) * (b[3] - b[1]) >= page.width * page.height * 0.5;
   };
   // 쪽 머리·꼬리 장식 띠: 쪽 맨 위(아래) 12% 안의 얇은 그림이 다른 쪽 2곳 이상의 같은 높이에도 있다(쪽마다 글자가 달라도)
@@ -526,10 +533,13 @@ export function reconstruct(input, opts = {}) {
       else if ((b[2] - b[0]) * (b[3] - b[1]) >= W * H * 0.7) {
         // 쪽을 거의 덮는 그림: 위에 글이 없으면 원본 그림, 큰 제목이 얹히면 표지(보이는 그대로),
         // 본문이 빽빽하면 종이 바탕, 본문이 그림 안에 갇혀 있으면 글상자
-        if (over.length < 3) render = !single;
+        // 쪽 밖으로 크게 넘치는 표지 그림(앞·책등·뒤 펼침 한 장): 원본을 꺼내면 뒤표지까지 나오므로 보이는 쪽만 그린다
+        const spills = single && (im.bbox[0] < -2 || im.bbox[1] < -2 || im.bbox[2] > W + 2 || im.bbox[3] > H + 2);
+        if (over.length < 3) render = !single || spills;
         else if (titled) render = true;
         else if (over.length >= 200) kind = "background";
         else if (linesBoxedBy(page, b)) kind = "panel";
+        else if (spills) render = true;
       } else if (!single && linesBoxedBy(page, b)) {
         // 여러 조각으로 저장된 카드(위·아래 막대가 달린 두루마리 모양 핸드아웃 등)도 글 줄이 그 안에 갇혀 있으면 글상자.
         // 예전에는 조각을 묶은 그림은 보이는 그대로 그려, 한 장짜리 카드(글상자 → 표)와 결과가 달랐다
@@ -1260,7 +1270,7 @@ function takeNumberColumns(rows) {
   return out;
 }
 
-function findGutters(allRows, W, H) {
+export function findGutters(allRows, W, H) {
   // 머리글·꼬리글 영역(위아래 7%)의 줄과 본문보다 작은 글씨(쪽 번호 등)는 단 경계 판단에서 뺀다
   const bodySz = median(allRows.map((r) => r.size));
   const rows = allRows.filter((r) => !(H && (r.oy < H * 0.07 || r.oy > H * 0.93) && r.size < bodySz * 1.2) && r.size >= bodySz * 0.75);
@@ -1312,6 +1322,56 @@ function findGutters(allRows, W, H) {
       start = -1;
     }
   }
+  // 일부 PDF는 양쪽 단을 한 텍스트 줄로 저장하면서 단 사이마다 폭이 큰 공백 이동을 넣는다.
+  // 줄마다 왼쪽 끝/오른쪽 시작이 조금씩 달라 모든 행에 공통인 빈 세로 띠가 minW보다 좁아지면
+  // 위의 픽셀 점유 방식만으로는 단을 놓친다. 실제 보이는 글자 사이의 큰 간격이 같은 x에서
+  // 세 줄 이상 반복되는지도 보조 단서로 사용한다(일반 낱말 간격은 글자 크기 1.2배보다 작다).
+  const gapCandidates = [];
+  rows.forEach((r, ri) => {
+    for (let i = 1; i < r.gs.length; i++) {
+      const left = r.gs[i - 1], right = r.gs[i], gap = right.x0 - left.x1;
+      if (gap >= Math.max(minW, bodySz * 1.8)) gapCandidates.push({ ri, left: left.x1, right: right.x0, mid: (left.x1 + right.x0) / 2 });
+    }
+  });
+  gapCandidates.sort((a, b) => a.mid - b.mid);
+  const gapGroups = [];
+  for (const c of gapCandidates) {
+    const last = gapGroups.at(-1);
+    if (last && c.mid - last.mid <= bodySz) { last.items.push(c); last.mid = median(last.items.map((q) => q.mid)); }
+    else gapGroups.push({ mid: c.mid, items: [c] });
+  }
+  for (const group of gapGroups) {
+    const uniqueRows = new Set(group.items.map((q) => q.ri));
+    if (uniqueRows.size < 3) continue;
+    const cut = median(group.items.map((q) => q.mid));
+    const leftRows = rows.filter((r) => r.gs.some((g) => g.x1 < cut)).length;
+    const rightRows = rows.filter((r) => r.gs.some((g) => g.x0 > cut)).length;
+    if (leftRows < 3 || rightRows < 3 || gutters.some((g) => Math.abs((g[2] ?? (g[0] + g[1]) / 2) - cut) < bodySz * 2)) continue;
+    // 진짜 단 사이라면 그 자리를 가로지르는 줄 대부분(60% 이상)에 큰 틈이 있다. 세 줄만 우연히 맞는 넓은 틈 —
+    // 양쪽 정렬로 벌어진 띄어쓰기, 시험지의 답 쓰는 빈칸 — 은 단이 아니다(영어 시험지에서 문장 한가운데가 단으로 갈렸다).
+    const crossing = rows.filter((r) => r.gs.some((g) => g.x0 < cut) && r.gs.some((g) => g.x1 > cut)).length;   // 그 자리를 지나가는 줄(글자가 걸쳐 있어도)
+    if (uniqueRows.size < crossing * .6) continue;
+    // 단이라면 틈 양쪽이 모두 이어지는 글(폭이 글자 크기의 12배쯤 이상)이다. 양쪽이 짧은 칸이면 선 없는 표다(이름 표:
+    // "1 Arthur Brigitte Becker" — 단으로 가르면 행이 깨져 남자 이름·여자 이름·성이 따로따로 나열됐다).
+    // (틈에 붙은 글 덩이만 잰다: 다음 큰 틈 너머 — 옆 칸·옆 단 — 까지 재면 짧은 칸도 길어 보였다)
+    const sideWidth = (side) => median(group.items.map((q) => {
+      const gs = rows[q.ri].gs;
+      let i = gs.findIndex((g) => side < 0 ? g.x1 > q.left + 1 : g.x0 >= q.right - 1);
+      if (side < 0) i = (i < 0 ? gs.length : i) - 1;
+      if (i < 0 || i >= gs.length) return 0;
+      const edge = side < 0 ? gs[i].x1 : gs[i].x0; let far = side < 0 ? gs[i].x0 : gs[i].x1;
+      for (let k = i + side; k >= 0 && k < gs.length; k += side) {
+        const gap = side < 0 ? gs[k + 1].x0 - gs[k].x1 : gs[k].x0 - gs[k - 1].x1;
+        if (gap >= bodySz * 1.8) break;
+        far = side < 0 ? gs[k].x0 : gs[k].x1;
+      }
+      return Math.abs(edge - far);
+    }));
+    if (sideWidth(-1) < bodySz * 12 || sideWidth(1) < bodySz * 12) continue;
+    const a = median(group.items.map((q) => q.left)), b = median(group.items.map((q) => q.right));
+    gutters.push([Math.min(a, cut), Math.max(b, cut), cut]);
+  }
+  gutters.sort((a, b) => (a[2] ?? 0) - (b[2] ?? 0));
   return gutters;
 }
 

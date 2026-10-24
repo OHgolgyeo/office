@@ -363,6 +363,11 @@ export function withOnlyImages(page, keepIds, fn, { keepText = false } = {}) {
 /** 쪽 하나를 바로 JPEG 로(보기 화면용, PNG 를 거치지 않아 빠르다).
  *  region([x0,y0,x1,y1] pt)을 주면 쪽에서 그 부분만 보이는 그대로(그림 위 글자·선 포함) 그린다. */
 export function renderPageJpeg(page, scale = 1.25, quality = 82, region = null) {
+  return encodeBgraJpeg(renderPageBgra(page, scale, region), quality);
+}
+/** 쪽(또는 region)을 scale 로 그린 BGRA 비트맵 { data, width, height }. 쪽 그림 작업 스레드(render-worker.mjs)가 이것만 하고,
+ *  JPEG 은 메인 프로세스의 내장 변환(nativeImage)으로 만든다. */
+export function renderPageBgra(page, scale = 1.25, region = null) {
   const M = page.module, h = page.pageIdx;
   const PW = M._FPDF_GetPageWidth(h), PH = M._FPDF_GetPageHeight(h);
   const [rx0, ry0, rx1, ry1] = region || [0, 0, PW, PH];
@@ -376,12 +381,18 @@ export function renderPageJpeg(page, scale = 1.25, quality = 82, region = null) 
     // PDFium 은 BGRA 로 그린다
     const bgra = Buffer.alloc(W * H * 4);
     for (let y = 0; y < H; y++) bgra.set(M.HEAPU8.subarray(base + y * stride, base + y * stride + W * 4), y * W * 4);
-    if (nativeImage) {
-      try { return nativeImage.createFromBitmap(bgra, { width: W, height: H }).toJPEG(quality); } catch { /* 아래 방식으로 */ }
-    }
-    // 4바이트씩 한 번에 B↔R 바꾸기(글자 단위 반복보다 빠르다)
-    const a = new Uint32Array(bgra.buffer, bgra.byteOffset, W * H);
-    for (let i = 0; i < a.length; i++) { const v = a[i]; a[i] = 0xff000000 | ((v & 0xff) << 16) | (v & 0xff00) | ((v >>> 16) & 0xff); }
-    return jpeg.encode({ data: bgra, width: W, height: H }, quality).data;
+    return { data: bgra, width: W, height: H };
   } finally { M._FPDFBitmap_Destroy(bmp); }
+}
+/** Electron 안이면 내장 변환이 되는가(아니면 encodeBgraJpeg 가 자바스크립트로 한다 — 느리다) */
+export const hasNativeJpeg = () => !!nativeImage;
+/** BGRA 비트맵 → JPEG. data 는 바뀔 수 있다(자바스크립트 변환은 그 자리에서 RGBA 로 바꾼다). */
+export function encodeBgraJpeg({ data: bgra, width: W, height: H }, quality = 82) {
+  if (nativeImage) {
+    try { return nativeImage.createFromBitmap(Buffer.from(bgra.buffer, bgra.byteOffset, bgra.byteLength), { width: W, height: H }).toJPEG(quality); } catch { /* 아래 방식으로 */ }
+  }
+  // 4바이트씩 한 번에 B↔R 바꾸기(글자 단위 반복보다 빠르다)
+  const a = new Uint32Array(bgra.buffer, bgra.byteOffset, W * H);
+  for (let i = 0; i < a.length; i++) { const v = a[i]; a[i] = 0xff000000 | ((v & 0xff) << 16) | (v & 0xff00) | ((v >>> 16) & 0xff); }
+  return jpeg.encode({ data: bgra, width: W, height: H }, quality).data;
 }

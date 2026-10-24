@@ -20,7 +20,8 @@ const EXPORT_FILTERS = {
 const main = { editor: null, name: "새 문서.hwpx", path: null, dirty: false };
 const emptySub = () => ({ id: "", kind: null, editor: null, name: "", path: null, dirty: false, viewerId: null, element: null });
 const subTabs = [];
-const spareSubEditors = [], SPARE_SUB_EDITORS = 3;                 // 닫은 서브 문서 편집기를 숨겨 두었다가 다음 문서 탭에 다시 쓴다(closeSub·openSubDoc)
+const spareSubEditors = [], SPARE_SUB_EDITORS = 1;                 // 닫은 서브 문서 편집기는 한 개만 재사용한다(여러 편집기 상시 메모리 점유 방지)
+const PDF_SUSPEND_MS = 12_000;                                    // 보이지 않는 PDF iframe은 잠시 뒤 내리고 현재 쪽만 기억한다
 let sub = emptySub(), nextSubId = 1;
 const subTabsShell = $("#sub-tabs-shell"), subTabsElement = $("#sub-tabs"), statusElement = $("#status"), subCloseElement = $("#sub-close");
 
@@ -123,13 +124,43 @@ function mountSubTabs(tab) {
   }
   doc.body.prepend(subTabsShell); renderSubTabs(); return true;
 }
+function pdfViewUrl(tab) {
+  const page = Number.isInteger(tab.pdfState?.page) ? tab.pdfState.page : 0;
+  return `/pdf/${tab.viewerId}/view?page=${page}`;
+}
+function mountPdfFrame(tab) {
+  if (!tab?.viewerId || !tab.element) return;
+  tab.suspended = false;
+  tab.element.innerHTML = `<iframe src="${pdfViewUrl(tab)}" title="PDF 보기"></iframe>`;
+  const frame = tab.element.querySelector("iframe");
+  frame.addEventListener("load", () => { if (tab === sub) mountSubTabs(tab); }, { once: true });
+}
+async function suspendPdfTab(tab) {
+  clearTimeout(tab?.suspendTimer); if (!tab || tab === sub || tab.kind !== "pdf" || tab.suspended || !subTabs.includes(tab)) return;
+  const frame = tab.element?.querySelector("iframe");
+  try { tab.pdfState = frame?.contentWindow?.ogolgyePdfSuspendState?.() || tab.pdfState || { page: 0 }; } catch { tab.pdfState ||= { page: 0 }; }
+  try { await Promise.race([Promise.resolve(frame?.contentWindow?.ogFlushAnnotations?.()), new Promise((resolve) => setTimeout(resolve, 800))]); } catch { /* 다음 자동 저장 때 다시 시도 */ }
+  if (tab === sub || !subTabs.includes(tab)) return;
+  frame?.remove(); tab.suspended = true;
+  // 문서 세션은 탭 복원을 위해 남기되, 렌더링 JPEG·미리보기 캐시는 즉시 비운다.
+  fetch(`/pdf/${tab.viewerId}/trim`, { method: "POST" }).catch(() => {});
+}
+function schedulePdfSuspend(tab) {
+  if (tab?.kind !== "pdf" || tab === sub || tab.suspended) return;
+  clearTimeout(tab.suspendTimer); tab.suspendTimer = setTimeout(() => suspendPdfTab(tab), PDF_SUSPEND_MS);
+}
 function activateSub(tab) {
   if (!tab || !subTabs.includes(tab)) return;
   sub = tab;
-  for (const item of subTabs) if (item.element) item.element.hidden = item !== tab;
+  for (const item of subTabs) {
+    if (item.element) item.element.hidden = item !== tab;
+    if (item === tab) clearTimeout(item.suspendTimer); else schedulePdfSuspend(item);
+  }
+  if (tab.kind === "pdf" && tab.suspended) mountPdfFrame(tab);
   mountSubTabs(tab);
   renderSubTabs();
   notifyMainResize();
+  if (tab.kind === "doc") void refreshDirty(tab);                 // 숨겨 둔 동안에는 묻지 않고, 다시 보일 때 즉시 확인한다
 }
 function makeSub(kind, name, path = null, reuseElement = null) {
   const tab = { ...emptySub(), id: `sub-${nextSubId++}`, kind, name, path };
@@ -142,6 +173,7 @@ function makeSub(kind, name, path = null, reuseElement = null) {
 async function closeSub(tab = sub, skipConfirm = false) {
   if (!subTabs.includes(tab)) return true;
   if (!skipConfirm && tab.kind === "doc" && tab.dirty && !confirm(`서브뷰 문서 '${tab.name}'에 저장하지 않은 내용이 있습니다. 닫을까요?`)) return false;
+  clearTimeout(tab.suspendTimer);
   if (tab.kind === "pdf" && tab.viewerId) {
     // 아직 안 보낸 주석을 먼저 보내고(최대 0.8초), 서버의 PDF 세션을 내려놓는다(남겨 두면 탭마다 50~110MB 가 쌓였다)
     const w = tab.element?.querySelector("iframe")?.contentWindow;
@@ -182,9 +214,8 @@ async function openSubPdf(file) {
   const info = await r.json();
   if (!r.ok) { tab.element.innerHTML = `<div class="busy">PDF를 열 수 없습니다. (${info.error || r.status})</div>`; return; }
   tab.viewerId = info.id;
-  tab.element.innerHTML = `<iframe src="/pdf/${info.id}/view" title="PDF 보기"></iframe>`;
-  const frame = tab.element.querySelector("iframe");
-  frame.addEventListener("load", () => { if (tab === sub) mountSubTabs(tab); }, { once: true });
+  if (tab === sub) mountPdfFrame(tab);
+  else { tab.element.innerHTML = ""; tab.suspended = true; tab.pdfState = { page: 0 }; }
   status("");
 }
 // 서브뷰에 아무 문서나: PDF 는 PDF 보기, 한글은 그대로, 그 밖(Word·ODT·RTF·텍스트·Markdown·HTML·EPUB·CSV·Excel·PowerPoint)은
@@ -1082,12 +1113,14 @@ async function editorDirty(who) {
   const st = await who.editor.getDocumentState();                  // 연결 통로가 없는 옛 편집 화면
   return st ? !!st.dirty : null;
 }
-// ── 저장 안 한 변경 표시: 편집기에 주기적으로 묻는다
+async function refreshDirty(who) {
+  if (!who?.editor || (who !== main && who.kind !== "doc")) return;
+  try { const dirty = await editorDirty(who); if (dirty !== null && dirty !== who.dirty) setDirty(who, dirty); } catch { /* 불러오는 중 */ }
+}
+// ── 저장 안 한 변경 표시: 화면에 보이는 편집기에만 묻는다. 숨은 문서 전체를 순회하면 큰 문서 탭 수만큼 주기적인 렉이 생긴다.
 setInterval(async () => {
-  for (const who of [main, ...subTabs]) {
-    if (!who.editor || (who !== main && who.kind !== "doc")) continue;
-    try { const dirty = await editorDirty(who); if (dirty !== null && dirty !== who.dirty) setDirty(who, dirty); } catch { /* 불러오는 중 */ }
-  }
+  await refreshDirty(main);
+  if (sub.kind === "doc") await refreshDirty(sub);
 }, 1200);
 
 // ── 시작: 빈 문서

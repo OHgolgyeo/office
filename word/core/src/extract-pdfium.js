@@ -48,6 +48,35 @@ export function getLibrary() {
   return libPromise;
 }
 
+/** 페이지 전체 래스터 그림만 있고 쓸 만한 PDF 원문 글자가 없는 문서인가.
+ * 스캔 PDF에도 쪽 번호나 부정확한 검색용 글자 몇 개가 들어 있는 경우가 있어,
+ * 큰 래스터가 지면의 절반 이상을 덮고 보이는 글자가 48자 이하인 쪽은 스캔으로 본다. */
+export function isRasterOnlyDocument(input) {
+  const pages = input?.pages || [];
+  if (!pages.length) return false;
+  return pages.every((page) => {
+    const chars = (page.glyphs || []).filter((g) => !g.invisible && !/\s/u.test(g.c || "")).length;
+    const pageArea = Math.max(1, Number(page.width || 0) * Number(page.height || 0));
+    const rasterArea = (page.images || []).reduce((sum, image) => {
+      const b = image.bbox || [0, 0, 0, 0];
+      const w = Math.max(0, Math.min(page.width, b[2]) - Math.max(0, b[0]));
+      const h = Math.max(0, Math.min(page.height, b[3]) - Math.max(0, b[1]));
+      return sum + w * h;
+    }, 0);
+    return chars <= 48 && rasterArea >= pageArea * 0.5;
+  });
+}
+
+/** Kiwi는 한글 줄 끝과 다음 줄 첫 글자의 경계에서만 쓰인다. 한글이 없는 영문·일문·중문 PDF에
+ *  약 900MB 모델을 올려도 복원 결과에는 전혀 관여하지 않으므로, 실제 한글 원문이 있을 때만 불러온다. */
+export function needsKoreanSpacer(input) {
+  let hangul = 0;
+  for (const page of input?.pages || []) for (const g of page.glyphs || []) {
+    if (!g.invisible && /[가-힣]/u.test(String(g.c || "")) && ++hangul >= 2) return true;
+  }
+  return false;
+}
+
 /**
  * @param {Uint8Array} bytes  PDF 파일 바이트
  * @returns {Promise<{pages: Page[]}>}

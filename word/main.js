@@ -4,7 +4,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
-import { startServer, warmUp, shutdown } from "./server.js";
+import { startServer, shutdown, setPaddleOcrProvider } from "./server.js";
 import { htmlArchive, pdfPrintParts, pdfPrintStreamShell, pdfPrintStreamPage } from "./core/export-files.js";
 import { officeExport } from "./core/export-office.js";
 import { GoogleDocs } from "./core/google-docs.js";
@@ -17,6 +17,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_ICON = path.join(__dirname, "assets", "icons", "word-folder-blue-to-sky.png");
 let win;
 let appOrigin = "";
+let paddleWindow = null, paddleReady = null, paddleSeq = 0, paddleIdleTimer = null;
+const paddleJobs = new Map();
 const writablePaths = new Set();
 const pdfStreams = new Map();
 
@@ -91,12 +93,13 @@ async function finishPdfStream(id) {
 }
 
 async function createWindow() {
+  const paddleSmokeFile = process.env.OG_PADDLE_SMOKE_RESULT || "";
   const authToken = crypto.randomBytes(32).toString("hex");
   const { port } = await startServer(0, { authToken }); // 빈 포트를 골라 127.0.0.1 에만 연다
   appOrigin = `http://127.0.0.1:${port}`;
-  warmUp();                                        // PDF 준비 작업 스레드를 띄워 둔다(Kiwi 는 PDF 를 처음 준비할 때)
+  setPaddleOcrProvider(recognizeWithPaddle);
   win = new BrowserWindow({
-    width: 1500, height: 950, title: "오골계 워드",
+    width: 1500, height: 950, title: "오골계 워드", show: !paddleSmokeFile,
     icon: APP_ICON,
     // 제목 표시줄은 화면이 그린다(Windows 기본보다 5px 높게, 문서 이름 표시). 창 버튼만 Windows가 그린다.
     // 높이·색은 renderer/style.css 의 .titlebar 와 같게 맞춘다.
@@ -116,11 +119,119 @@ async function createWindow() {
     url: appOrigin, name: "ogolgye_session", value: authToken,
     httpOnly: true, secure: false, sameSite: "strict",
   });
+  // 배포 전 실검사 전용: 실제 설치본과 같은 진입점·보안 쿠키·숨은 OCR 화면에서 한국어 모델을 실행한다.
+  if (paddleSmokeFile) {
+    try {
+      // 외부 글꼴·화면 캡처에 의존하지 않는 검사용 활자 PNG. 한국어 모델이 함께 지원하는 라틴 문자 인식까지 검사한다.
+      const { PNG } = await import("pngjs"), image = new PNG({ width: 900, height: 220 });
+      image.data.fill(255);
+      const glyphs = {
+        O: ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
+        C: ["01111", "10000", "10000", "10000", "10000", "10000", "01111"],
+        R: ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
+        T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+        E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
+        S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
+      };
+      const scale = 18; let penX = 45;
+      for (const char of "OCR TEST") {
+        if (char === " ") { penX += scale * 3; continue; }
+        glyphs[char].forEach((row, gy) => [...row].forEach((on, gx) => {
+          if (on !== "1") return;
+          for (let y = 0; y < scale; y++) for (let x = 0; x < scale; x++) {
+            const at = ((45 + gy * scale + y) * image.width + penX + gx * scale + x) * 4;
+            image.data[at] = image.data[at + 1] = image.data[at + 2] = 0; image.data[at + 3] = 255;
+          }
+        }));
+        penX += scale * 7;
+      }
+      // OG_PADDLE_SMOKE_PNG: 이 그림들(;로 구분)을 대신 읽어 결과를 모두 남긴다 — 네이티브 PaddleOCR(core/paddle-native.js)과 견주기용
+      const pngs = (process.env.OG_PADDLE_SMOKE_PNG || "").split(";").filter(Boolean);
+      const det = process.env.OG_PADDLE_SMOKE_DET ? { detector: process.env.OG_PADDLE_SMOKE_DET } : {};
+      if (pngs.length) {
+        const all = [];
+        for (const f of pngs) { const t = Date.now(); all.push({ file: f, ms: 0, ...(await recognizeWithPaddle({ png: fs.readFileSync(f), packs: ["korean"], ...det })) }); all.at(-1).ms = Date.now() - t; }
+        fs.writeFileSync(paddleSmokeFile, JSON.stringify({ ok: true, compare: all }, null, 2)); app.quit(); return;
+      }
+      const png = PNG.sync.write(image);
+      const result = await recognizeWithPaddle({ png, packs: ["korean"], ...det });
+      // OG_PADDLE_SMOKE_PDF(스캔 PDF)가 있으면 실제 경로도: 서버로 열어 PDF 세션 작업 스레드 → 본체 → 숨은 OCR 화면
+      let pdfOcr = null;
+      if (process.env.OG_PADDLE_SMOKE_PDF) {
+        const headers = { cookie: `ogolgye_session=${authToken}` };
+        const info = await (await fetch(`${appOrigin}/api/pdf?name=smoke.pdf`, { method: "POST", headers, body: fs.readFileSync(process.env.OG_PADDLE_SMOKE_PDF) })).json();
+        for (let i = 0; i < 600; i++) { const st = await (await fetch(`${appOrigin}/pdf/${info.id}/status`, { headers })).json(); if (st.ready || st.error) break; await new Promise((r) => setTimeout(r, 100)); }
+        pdfOcr = (await (await fetch(`${appOrigin}/pdf/${info.id}/ocr/0`, { headers })).text()).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+      }
+      const ok = result.items?.some((x) => /ocr|test/i.test(x.text)) && (pdfOcr === null || /ocr|test/i.test(pdfOcr));
+      fs.writeFileSync(paddleSmokeFile, JSON.stringify({ ok, pdfOcr, ...result }, null, 2));
+    } catch (e) { fs.writeFileSync(paddleSmokeFile, JSON.stringify({ ok: false, error: String(e?.stack || e) }, null, 2)); process.exitCode = 1; }
+    app.quit(); return;
+  }
   await win.loadURL(`${appOrigin}/app/`);
   // 배포본 회귀 검사 전용: 실제 사용자 실행에는 없는 환경 변수이며, 화면과 iframe이 뜰 시간을 준 뒤 스스로 끝낸다.
   const smokeMs = Number(process.env.OG_SMOKE_EXIT_MS || 0);
   if (smokeMs > 0) setTimeout(() => app.quit(), Math.max(1000, smokeMs)).unref?.();
 }
+
+function closePaddleWindow(reason = "PaddleOCR 실행기가 끝났습니다.") {
+  clearTimeout(paddleIdleTimer); paddleIdleTimer = null;
+  const old = paddleWindow; paddleWindow = null; paddleReady = null;
+  for (const job of paddleJobs.values()) job.reject(new Error(reason));
+  paddleJobs.clear();
+  if (old && !old.isDestroyed()) old.destroy();
+}
+function schedulePaddleRelease() {
+  clearTimeout(paddleIdleTimer);
+  paddleIdleTimer = setTimeout(() => { if (!paddleJobs.size) closePaddleWindow(); }, 15 * 1000);
+  paddleIdleTimer.unref?.();
+}
+async function ensurePaddleWindow() {
+  if (paddleWindow && !paddleWindow.isDestroyed() && paddleReady) return paddleReady;
+  paddleWindow = new BrowserWindow({ show: false, webPreferences: {
+    preload: path.join(__dirname, "paddle-preload.cjs"), contextIsolation: true, sandbox: true,
+  } });
+  const current = paddleWindow;
+  current.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  current.webContents.on("will-navigate", (event, url) => {
+    if (url !== `${appOrigin}/paddle-sdk/host.html`) event.preventDefault();
+  });
+  paddleReady = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ipcMain.off("paddle-ocr:ready", ready);
+      reject(new Error("PaddleOCR 실행기를 시작하지 못했습니다."));
+    }, 30000);
+    const ready = (event) => {
+      if (event.sender !== current.webContents) return;
+      clearTimeout(timer); ipcMain.off("paddle-ocr:ready", ready); resolve();
+    };
+    ipcMain.on("paddle-ocr:ready", ready);
+  });
+  current.once("closed", () => { if (paddleWindow === current) closePaddleWindow(); });
+  try {
+    await current.loadURL(`${appOrigin}/paddle-sdk/host.html`);
+    await paddleReady;
+  } catch (e) {
+    if (paddleWindow === current) closePaddleWindow(String(e?.message || e));
+    throw e;
+  }
+}
+async function recognizeWithPaddle({ png, packs, mime = "image/png", detector = "PP-OCRv5_mobile_det" }) {
+  await ensurePaddleWindow();
+  clearTimeout(paddleIdleTimer); paddleIdleTimer = null;
+  const id = ++paddleSeq;
+  return new Promise((resolve, reject) => {
+    paddleJobs.set(id, { resolve, reject });
+    paddleWindow.webContents.send("paddle-ocr:request", { id, bytes: new Uint8Array(png), packs, mime, detector });
+  }).finally(schedulePaddleRelease);
+}
+ipcMain.on("paddle-ocr:result", (event, result) => {
+  if (!paddleWindow || event.sender !== paddleWindow.webContents || !Number.isInteger(result?.id)) return;
+  const job = paddleJobs.get(result.id); if (!job) return;
+  paddleJobs.delete(result.id);
+  if (result.ok) job.resolve({ items: Array.isArray(result.items) ? result.items : [] });
+  else job.reject(new Error(result.error || "PaddleOCR 인식에 실패했습니다."));
+});
 
 // 저장·열기 대화상자(화면에서 요청)
 handle("file:save", async (_e, { bytes, name, filters }) => {
@@ -192,6 +303,34 @@ app.setAppUserModelId("com.ogolgye.word");
 // ── 자동 업데이트: GitHub 릴리스(OHgolgyeo/office)에 새 버전이 올라오면 받아 두고 설치한다.
 // Windows: 받은 뒤 "지금 다시 시작"을 고르면 바로, 아니면 프로그램을 닫을 때 설치된다. 맥: 알려 주고 내려받기 페이지를 연다. 설치본에서만 동작한다.
 const UPDATE_CHECK_MS = 4 * 60 * 60 * 1000;                  // 켜 둔 동안 4시간마다 다시 확인
+// 바뀐 점: release-notes.json(버전 → { title, text } — 안내문 그대로, 또는 { title, items } — 번호 매긴 목록) — 업데이트 뒤 첫 실행 안내에 쓰고, 깃허브 릴리스 글(.github/word-release-notes.md)도
+// 같은 내용으로 만든다. 업데이트 알림 창은 아직 설치 안 된 새 버전의 글이 필요하므로 깃허브 릴리스 글(info.releaseNotes)을 쓴다.
+function releaseNotesOf(version) {
+  try { return JSON.parse(fs.readFileSync(path.join(__dirname, "release-notes.json"), "utf8"))[version] || null; } catch { return null; }
+}
+const notesText = (items) => items.map((t, i) => `${i + 1}. ${t}`).join("\n");
+/** electron-updater 가 준 릴리스 글(GitHub: HTML 문자열, 또는 [{ version, note }])을 알림 창에 넣을 글로 */
+function updateNotesText(info) {
+  const raw = Array.isArray(info?.releaseNotes) ? info.releaseNotes.map((r) => r?.note || "").join("\n") : String(info?.releaseNotes || "");
+  const text = raw.replace(/<\/(p|li|h\d|div)>|<br\s*\/?>/gi, "\n").replace(/<li[^>]*>/gi, "• ").replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&")
+    .split("\n").map((l) => l.trim()).filter(Boolean).join("\n");
+  return text.length > 1500 ? text.slice(0, 1500) + "…" : text;
+}
+/** 업데이트(또는 처음 설치) 뒤 처음 켤 때 한 번 바뀐 점을 알린다. 본 버전은 사용자 자료(userData)의 whats-new.json 에 남긴다. */
+async function showWhatsNewOnce() {
+  if (!app.isPackaged && !process.env.OG_WHATS_NEW) return;
+  if (process.env.OG_SMOKE_EXIT_MS || process.env.OG_PADDLE_SMOKE_RESULT) return;   // 배포 전 실검사는 창을 띄우지 않는다
+  const file = path.join(app.getPath("userData"), "whats-new.json"), version = app.getVersion();
+  let seen = null;
+  try { seen = JSON.parse(fs.readFileSync(file, "utf8")).seen || null; } catch { /* 처음 */ }
+  if (seen === version) return;
+  const notes = releaseNotesOf(version);
+  try { fs.writeFileSync(file, JSON.stringify({ seen: version })); } catch { /* 못 적으면 다음에 또 알린다 */ }
+  if (!notes || !win || win.isDestroyed()) return;
+  await dialog.showMessageBox(win, { type: "info", title: "업데이트 안내", buttons: ["확인"], defaultId: 0, noLink: true,
+    message: notes.title || `오골계 워드 ${version} 업데이트 안내`, detail: notes.text || notesText(notes.items || []) });
+}
 function setupAutoUpdate() {
   if (!app.isPackaged) return;
   const { autoUpdater } = updater;
@@ -210,7 +349,7 @@ function setupAutoUpdate() {
       const r = await dialog.showMessageBox(win, {
         type: "info", title: "업데이트", buttons: ["내려받기 페이지 열기", "나중에"], defaultId: 0, cancelId: 1,
         message: `오골계 워드 ${info.version} 새 버전이 나왔습니다.`,
-        detail: "내려받기 페이지에서 맥용 파일(.dmg)을 받아 설치하세요. 설정과 문서는 그대로 남습니다.",
+        detail: (updateNotesText(info) ? `바뀐 점\n${updateNotesText(info)}\n\n` : "") + "내려받기 페이지에서 맥용 파일(.dmg)을 받아 설치하세요. 설정과 문서는 그대로 남습니다.",
       });
       if (r.response === 0) shell.openExternal("https://github.com/OHgolgyeo/office/releases/latest");
     });
@@ -221,7 +360,7 @@ function setupAutoUpdate() {
     const r = await dialog.showMessageBox(win, {
       type: "info", title: "업데이트", buttons: ["지금 다시 시작", "나중에"], defaultId: 0, cancelId: 1, noLink: true,
       message: `오골계 워드 ${info.version} 업데이트를 받았습니다.`,
-      detail: "지금 다시 시작하면 바로 적용됩니다. 저장하지 않은 문서가 있으면 먼저 저장한 뒤 누르세요.\n\"나중에\"를 누르면 프로그램을 닫을 때 자동으로 적용됩니다.",
+      detail: (updateNotesText(info) ? `바뀐 점\n${updateNotesText(info)}\n\n` : "") + "지금 다시 시작하면 바로 적용됩니다. 저장하지 않은 문서가 있으면 먼저 저장한 뒤 누르세요.\n\"나중에\"를 누르면 프로그램을 닫을 때 자동으로 적용됩니다.",
     });
     if (r.response === 0) setImmediate(() => autoUpdater.quitAndInstall(false, true));
   });
@@ -233,6 +372,7 @@ function setupAutoUpdate() {
 
 app.whenReady().then(async () => {
   await createWindow(); setupAutoUpdate();
+  showWhatsNewOnce().catch(() => {});
   // Google 드라이브에 연결해 두었으면 연결 토큰을 뒤에서 미리 받아 둔다(드라이브 창의 첫 목록이 토큰 갱신을 기다리지 않게)
   setTimeout(() => { try { googleDocs().warm().catch(() => {}); } catch { /* 연결 안 함 */ } }, 4000);
 });
@@ -242,6 +382,7 @@ let shuttingDown = false;
 app.on("before-quit", (e) => {
   if (shuttingDown) return;
   shuttingDown = true; e.preventDefault();
+  setPaddleOcrProvider(null); closePaddleWindow();
   for (const id of [...pdfStreams.keys()]) closePdfStream(id);
   Promise.race([shutdown(), new Promise((r) => setTimeout(r, 1500))]).finally(() => app.quit());
 });
